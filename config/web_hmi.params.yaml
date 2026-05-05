@@ -1,0 +1,14 @@
+webui:
+  ros__parameters:
+    core_service: /core/query
+    database_service: /database/query
+    measurement_topic: /ltm2985/measurement
+    bind_host: 0.0.0.0
+    bind_port: 7860
+    title: Experiment Control
+    queue_enabled: false
+    auth_enabled: false
+    auth_user: admin
+    auth_password: admin
+    status_refresh_period_sec: 1.0
+    control_loop_period_sec: 1.0

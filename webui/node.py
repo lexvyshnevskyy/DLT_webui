@@ -9,8 +9,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import gradio as gr
 import rclpy
-from core.srv import Query as CoreQuery
 from database.srv import Query as DatabaseQuery
+CoreQuery = DatabaseQuery
 from msgs.msg import Measurement
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node

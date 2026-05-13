@@ -7,11 +7,11 @@
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>msgs</depend>
-  <depend>core</depend>
   <depend>database</depend>
 
   <exec_depend>ament_index_python</exec_depend>

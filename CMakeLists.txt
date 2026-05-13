@@ -6,27 +6,24 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+
 find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(msgs REQUIRED)
-find_package(core REQUIRED)
 find_package(database REQUIRED)
 
+ament_python_install_package(${PROJECT_NAME})
+
 install(PROGRAMS
-  webui/run.py
-  DESTINATION lib/${PROJECT_NAME}
+        webui/run.py
+        DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY
-  webui
-  DESTINATION lib/${PROJECT_NAME}
-  FILES_MATCHING PATTERN "*.py"
-)
-
-install(DIRECTORY
-  launch
-  config
-  DESTINATION share/${PROJECT_NAME}
+        launch
+        config
+        DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

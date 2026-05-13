@@ -68,6 +68,7 @@ class WebHMINode(Node):
         self._last_core_snapshot: Dict[str, Any] = {}
         self._last_db_program_status: str = 'Idle'
         self._log_lines: Deque[str] = deque(maxlen=200)
+        self._last_service_log_time: Dict[str, float] = {}
 
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
 
@@ -83,6 +84,27 @@ class WebHMINode(Node):
         with self._lock:
             self._log_lines.appendleft(line)
         self.get_logger().info(message)
+
+    def _log_throttled(self, key: str, message: str, period_sec: float = 5.0) -> None:
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_service_log_time.get(key, 0.0)
+            if now - last < period_sec:
+                return
+            self._last_service_log_time[key] = now
+        self._log(message)
+
+    @staticmethod
+    def _critical_message(service_name: str) -> str:
+        return f'CRITICAL: required service is not available: {service_name}'
+
+    def _critical_service_dict(self, service_name: str) -> Dict[str, Any]:
+        return {
+            'result': 'Error',
+            'severity': 'CRITICAL',
+            'error': self._critical_message(service_name),
+            'service': service_name,
+        }
 
     def _on_measurement(self, msg: Measurement) -> None:
         payload = {
@@ -122,7 +144,52 @@ class WebHMINode(Node):
             self._last_core_snapshot = result
         return result
 
+    def _service_available(self, client: Any, timeout_sec: float = 0.05) -> bool:
+        try:
+            if client.service_is_ready():
+                return True
+            return bool(client.wait_for_service(timeout_sec=timeout_sec))
+        except Exception:
+            return False
+
+    def _db_available(self) -> bool:
+        return self._service_available(self.db_client)
+
+    def _core_available(self) -> bool:
+        return self._service_available(self.core_client)
+
+    def _critical_services_status(self) -> Dict[str, Any]:
+        core_ok = self._core_available()
+        db_ok = self._db_available()
+        missing: List[str] = []
+        if not core_ok:
+            missing.append(self.core_service)
+        if not db_ok:
+            missing.append(self.database_service)
+        return {
+            'core_service': self.core_service,
+            'core_available': core_ok,
+            'database_service': self.database_service,
+            'database_available': db_ok,
+            'system_ready': core_ok and db_ok,
+            'severity': 'OK' if core_ok and db_ok else 'CRITICAL',
+            'missing_required_services': missing,
+        }
+
+    def _database_unavailable_message(self) -> str:
+        message = self._critical_message(self.database_service)
+        self._log_throttled('database_unavailable', message)
+        return message
+
+    def _core_unavailable_message(self) -> str:
+        message = self._critical_message(self.core_service)
+        self._log_throttled('core_unavailable', message)
+        return message
+
     def _get_program_steps(self, program_id: int) -> List[ProgramStep]:
+        if not self._db_available():
+            raise RuntimeError(self._database_unavailable_message())
+
         response = self._db_query({'cmd': 'program_step_list', 'id': program_id})
         if response.get('result') != 'Ok':
             raise RuntimeError(response.get('error', 'Failed to get program steps'))
@@ -257,9 +324,15 @@ class WebHMINode(Node):
         return rows
 
     def _programs_table(self) -> List[List[Any]]:
+        if not self._db_available():
+            self._database_unavailable_message()
+            return []
+
         response = self._db_query({'cmd': 'program_all_list'})
         if response.get('result') != 'Ok':
-            raise RuntimeError(response.get('error', 'Failed to get programs'))
+            self._log(f'CRITICAL: failed to get programs from database: {response.get("error", "unknown error")}')
+            return []
+
         rows: List[List[Any]] = []
         for raw_row in response.get('row', []):
             parts = str(raw_row).split('^')
@@ -269,6 +342,10 @@ class WebHMINode(Node):
         return rows
 
     def _steps_table(self, program_id: int) -> List[List[Any]]:
+        if not self._db_available():
+            self._database_unavailable_message()
+            return []
+
         rows: List[List[Any]] = []
         for step in self._get_program_steps(program_id):
             rows.append([step.step_id, step.t_start, step.t_stop, step.minutes])
@@ -277,6 +354,7 @@ class WebHMINode(Node):
     def ui_refresh_status(self) -> Tuple[str, List[List[Any]], str]:
         status = self._current_status_dict()
         summary = {
+            'critical_services': self._critical_services_status(),
             'active_program_id': status['active_program_id'],
             'program_status': status['program_status'],
             'active_step_index': status['active_step_index'],
@@ -288,94 +366,175 @@ class WebHMINode(Node):
         return json.dumps(summary, indent=2), self._measurements_table(), log_text
 
     def ui_refresh_programs(self) -> Tuple[List[List[Any]], str]:
+        if not self._db_available():
+            message = self._database_unavailable_message()
+            return [], message
+
         rows = self._programs_table()
         return rows, f'Loaded {len(rows)} program(s).'
 
     def ui_load_program(self, program_id: float) -> Tuple[List[List[Any]], str]:
+        if not self._db_available():
+            message = self._database_unavailable_message()
+            return [], message
+
         program_id_int = int(program_id)
-        rows = self._steps_table(program_id_int)
-        return rows, f'Loaded {len(rows)} step(s) for program {program_id_int}.'
+        try:
+            rows = self._steps_table(program_id_int)
+            return rows, f'Loaded {len(rows)} step(s) for program {program_id_int}.'
+        except Exception as exc:
+            message = f'ERROR: failed to load program {program_id_int}: {exc}'
+            self._log(message)
+            return [], message
 
     def ui_create_program(self) -> Tuple[float, List[List[Any]], str]:
-        response = self._db_query({'cmd': 'new_program'})
-        if response.get('result') != 'Ok':
-            raise RuntimeError(response.get('error', 'Failed to create program'))
-        program_id = int(response.get('ID', 0))
-        self._log(f'Created program {program_id}')
-        return float(program_id), self._programs_table(), f'Created program {program_id}.'
+        if not self._db_available():
+            message = self._database_unavailable_message()
+            return 0.0, [], message
+
+        try:
+            response = self._db_query({'cmd': 'new_program'})
+            if response.get('result') != 'Ok':
+                message = f'ERROR: failed to create program: {response.get("error", "unknown error")}'
+                self._log(message)
+                return 0.0, self._programs_table(), message
+            program_id = int(response.get('ID', 0))
+            self._log(f'Created program {program_id}')
+            return float(program_id), self._programs_table(), f'Created program {program_id}.'
+        except Exception as exc:
+            message = f'ERROR: failed to create program: {exc}'
+            self._log(message)
+            return 0.0, [], message
 
     def ui_add_step(self, program_id: float, t_start: float, t_stop: float, minutes: float) -> Tuple[List[List[Any]], str]:
+        if not self._db_available():
+            message = self._database_unavailable_message()
+            return [], message
+
         program_id_int = int(program_id)
-        response = self._db_query(
-            {
-                'cmd': 'program_step_insert',
-                'program_id': program_id_int,
-                't_start': float(t_start),
-                't_stop': float(t_stop),
-                'minutes': float(minutes),
-            }
-        )
-        if response.get('result') != 'Ok':
-            raise RuntimeError(response.get('error', 'Failed to add step'))
-        self._log(f'Program {program_id_int}: added step t_start={t_start}, t_stop={t_stop}, minutes={minutes}')
-        return self._steps_table(program_id_int), f'Added step to program {program_id_int}.'
+        try:
+            response = self._db_query(
+                {
+                    'cmd': 'program_step_insert',
+                    'program_id': program_id_int,
+                    't_start': float(t_start),
+                    't_stop': float(t_stop),
+                    'minutes': float(minutes),
+                }
+            )
+            if response.get('result') != 'Ok':
+                message = f'ERROR: failed to add step: {response.get("error", "unknown error")}'
+                self._log(message)
+                return self._steps_table(program_id_int), message
+            self._log(f'Program {program_id_int}: added step t_start={t_start}, t_stop={t_stop}, minutes={minutes}')
+            return self._steps_table(program_id_int), f'Added step to program {program_id_int}.'
+        except Exception as exc:
+            message = f'ERROR: failed to add step to program {program_id_int}: {exc}'
+            self._log(message)
+            return [], message
 
     def ui_delete_step(self, program_id: float, step_id: float) -> Tuple[List[List[Any]], str]:
+        if not self._db_available():
+            message = self._database_unavailable_message()
+            return [], message
+
         program_id_int = int(program_id)
-        response = self._db_query({'cmd': 'program_delete_temp', 'id': int(step_id)})
-        if response.get('result') != 'Ok':
-            raise RuntimeError(response.get('error', 'Failed to delete step'))
-        self._log(f'Program {program_id_int}: deleted step {int(step_id)}')
-        return self._steps_table(program_id_int), f'Deleted step {int(step_id)}.'
+        step_id_int = int(step_id)
+        try:
+            response = self._db_query({'cmd': 'program_delete_temp', 'id': step_id_int})
+            if response.get('result') != 'Ok':
+                message = f'ERROR: failed to delete step {step_id_int}: {response.get("error", "unknown error")}'
+                self._log(message)
+                return self._steps_table(program_id_int), message
+            self._log(f'Program {program_id_int}: deleted step {step_id_int}')
+            return self._steps_table(program_id_int), f'Deleted step {step_id_int}.'
+        except Exception as exc:
+            message = f'ERROR: failed to delete step {step_id_int}: {exc}'
+            self._log(message)
+            return [], message
 
     def ui_start_program(self, program_id: float) -> str:
+        if not self._db_available():
+            return self._database_unavailable_message()
+        if not self._core_available():
+            return self._core_unavailable_message()
+
         program_id_int = int(program_id)
-        steps = self._get_program_steps(program_id_int)
-        if not steps:
-            raise RuntimeError(f'Program {program_id_int} has no steps.')
+        try:
+            steps = self._get_program_steps(program_id_int)
+            if not steps:
+                message = f'ERROR: program {program_id_int} has no steps.'
+                self._log(message)
+                return message
 
-        with self._lock:
-            already_running = self._active_program_id is not None
-        if already_running:
-            raise RuntimeError('Another program is already running. Stop it first.')
+            with self._lock:
+                already_running = self._active_program_id is not None
+            if already_running:
+                return 'ERROR: another program is already running. Stop it first.'
 
-        first_target_k = float(steps[0].t_start)
-        self._core_query(
-            {
-                'temperature_control': {
-                    'enabled': True,
-                    'target_k': first_target_k,
-                    'reset_integral': True,
+            first_target_k = float(steps[0].t_start)
+            self._core_query(
+                {
+                    'temperature_control': {
+                        'enabled': True,
+                        'target_k': first_target_k,
+                        'reset_integral': True,
+                    }
                 }
-            }
-        )
-        self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Running'})
-        with self._lock:
-            self._active_program_id = program_id_int
-            self._active_program_steps = steps
-            self._active_step_index = 0
-            self._active_step_started_monotonic = None
-            self._last_db_program_status = 'Running'
-            self._last_target_k = first_target_k
-        self._log(f'Program {program_id_int} started with {len(steps)} step(s).')
-        return f'Program {program_id_int} started.'
+            )
+            self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Running'})
+            with self._lock:
+                self._active_program_id = program_id_int
+                self._active_program_steps = steps
+                self._active_step_index = 0
+                self._active_step_started_monotonic = None
+                self._last_db_program_status = 'Running'
+                self._last_target_k = first_target_k
+            self._log(f'Program {program_id_int} started with {len(steps)} step(s).')
+            return f'Program {program_id_int} started.'
+        except Exception as exc:
+            message = f'ERROR: failed to start program {program_id_int}: {exc}'
+            self._log(message)
+            return message
 
     def ui_stop_program(self) -> str:
+        if not self._core_available():
+            message = self._core_unavailable_message()
+            with self._lock:
+                has_active_program = self._active_program_id is not None
+            if has_active_program:
+                return message + '; local program state was NOT cleared because heater control could not be disabled.'
+            return message
+
         with self._lock:
             program_id = self._active_program_id
         if program_id is None:
-            self._core_query({'temperature_control': {'enabled': False}})
-            with self._lock:
-                self._last_db_program_status = 'Stopped'
-            return 'No active program. Temperature control disabled.'
+            try:
+                self._core_query({'temperature_control': {'enabled': False}})
+                with self._lock:
+                    self._last_db_program_status = 'Stopped'
+                return 'No active program. Temperature control disabled.'
+            except Exception as exc:
+                message = f'ERROR: failed to disable temperature control: {exc}'
+                self._log(message)
+                return message
         self._finish_active_program('Stopped')
         return f'Program {program_id} stopped.'
 
     def ui_manual_target(self, target_k: float, enabled: bool) -> str:
-        response = self._core_query({'temperature_control': {'enabled': bool(enabled), 'target_k': float(target_k)}})
-        snapshot = response.get('temperature_control')
-        self._log(f'Manual target update: enabled={enabled}, target_k={target_k}')
-        return json.dumps(snapshot, indent=2)
+        if not self._core_available():
+            message = self._core_unavailable_message()
+            return json.dumps(self._critical_service_dict(self.core_service), indent=2)
+
+        try:
+            response = self._core_query({'temperature_control': {'enabled': bool(enabled), 'target_k': float(target_k)}})
+            snapshot = response.get('temperature_control')
+            self._log(f'Manual target update: enabled={enabled}, target_k={target_k}')
+            return json.dumps(snapshot, indent=2)
+        except Exception as exc:
+            message = f'ERROR: failed to apply manual target: {exc}'
+            self._log(message)
+            return json.dumps({'result': 'Error', 'severity': 'CRITICAL', 'error': message}, indent=2)
 
     def build_ui(self) -> gr.Blocks:
         with gr.Blocks(title=self.title) as demo:

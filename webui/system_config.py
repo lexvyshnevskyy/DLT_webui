@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from webui.collectors.serial_ports import list_serial_devices
+
+
+def read_env_file(path: str) -> Dict[str, str]:
+    env_path = Path(path)
+    if env_path.is_file():
+        return _parse_env_text(env_path.read_text(encoding='utf-8', errors='replace'))
+
+    result = subprocess.run(
+        ['sudo', '-n', 'cat', path],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode == 0:
+        return _parse_env_text(result.stdout)
+    return {}
+
+
+def _parse_env_text(text: str) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def write_env_file(path: str, updates: Dict[str, str]) -> Tuple[bool, str]:
+    current = read_env_file(path)
+    merged = {**current, **{k: str(v) for k, v in updates.items() if k}}
+
+    lines: List[str] = []
+    env_path = Path(path)
+    if env_path.is_file():
+        lines = env_path.read_text(encoding='utf-8', errors='replace').splitlines()
+    elif current:
+        lines = [f'{k}="{v}"' for k, v in current.items()]
+    else:
+        lines = ['# Delatometry runtime configuration']
+
+    seen = set()
+    new_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and '=' in stripped:
+            key = stripped.split('=', 1)[0].strip()
+            if key in merged:
+                new_lines.append(f'{key}="{merged[key]}"')
+                seen.add(key)
+                continue
+        new_lines.append(line)
+
+    for key, value in merged.items():
+        if key not in seen:
+            new_lines.append(f'{key}="{value}"')
+
+    content = '\n'.join(new_lines).rstrip() + '\n'
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text(content, encoding='utf-8')
+        return True, 'written (user writable)'
+    except PermissionError:
+        pass
+
+    proc = subprocess.run(
+        ['sudo', '-n', 'tee', path],
+        input=content,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True, 'written via sudo'
+    return False, proc.stderr.strip() or proc.stdout.strip() or f'exit {proc.returncode}'
+
+
+def serial_port_choices(current: str = '') -> List[str]:
+    ports = list_serial_devices()
+    if current and current not in ports:
+        ports.insert(0, current)
+    if not ports:
+        ports = ['/dev/ttyUSB0', '/dev/ttyACM0', '/dev/ttyAMA0', '/dev/ttyS0']
+    return ports
+
+
+def restart_service(service: str) -> Tuple[bool, str]:
+    svc = service if service.endswith('.service') else f'{service}.service'
+    proc = subprocess.run(
+        ['sudo', '-n', 'systemctl', 'restart', svc],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True, f'restarted {svc}'
+    return False, proc.stderr.strip() or proc.stdout.strip() or f'failed to restart {svc}'
+
+
+def get_configuration_snapshot(env_file: str) -> Dict[str, Any]:
+    env = read_env_file(env_file)
+    return {
+        'env_file': env_file,
+        'env_readable': bool(env),
+        'ltm2985': {
+            'port': env.get('DELATOMETRY_LTM2985_PORT', '/dev/ttyUSB0'),
+            'baudrate': env.get('DELATOMETRY_LTM2985_BAUDRATE', '230400'),
+        },
+        'measure_device': {
+            'port': env.get('DELATOMETRY_MEASURE_PORT', '/dev/ttyUSB0'),
+            'speed': env.get('DELATOMETRY_MEASURE_SPEED', '9600'),
+        },
+        'database': {
+            'host': env.get('DELATOMETRY_DB_HOST', '127.0.0.1'),
+            'port': env.get('DELATOMETRY_DB_PORT', '3306'),
+            'name': env.get('DELATOMETRY_DB_NAME', 'exp'),
+            'user': env.get('DELATOMETRY_DB_USER', 'delatometry'),
+            'password': env.get('DELATOMETRY_DB_PASSWORD', ''),
+            'auto_init_schema': env.get('DELATOMETRY_DB_AUTO_INIT_SCHEMA', 'true').lower() == 'true',
+        },
+        'core': {
+            'namespace': env.get('DELATOMETRY_CORE_NAMESPACE', 'core'),
+            'measurement_topic': env.get('DELATOMETRY_CORE_MEASUREMENT_TOPIC', '/ltm2985/measurement'),
+            'enable_database_client': env.get('DELATOMETRY_CORE_ENABLE_DATABASE_CLIENT', 'false').lower() == 'true',
+            'enable_pwm_controller': env.get('DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER', 'false').lower() == 'true',
+        },
+        'ads1256': {
+            'simulate': env.get('DELATOMETRY_ADS1256_SIMULATE', 'false').lower() == 'true',
+            'fallback_to_simulation': env.get('DELATOMETRY_ADS1256_FALLBACK_TO_SIMULATION', 'true').lower() == 'true',
+        },
+    }

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, List, Tuple
 import gradio as gr
 
 from webui.e720_commands import PANEL_COMMANDS, command_choices
+from webui.ui_config_tab import build_configuration_tab
 from webui.e720_sweep import STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 
 if TYPE_CHECKING:
@@ -154,40 +155,8 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
                 with panel_row:
                     panel_btns.append(gr.Button(label))
 
-        with gr.Tab('Network'):
-            gr.Markdown('Uses NetworkManager (`nmcli`). Install sudoers: `src/webui/scripts/install_sudoers.sh`')
-            net_iface_table = gr.Dataframe(
-                headers=['interface', 'state', 'mac', 'ipv4', 'ipv6', 'speed_mbps'],
-                interactive=False,
-                label='Interfaces',
-            )
-            with gr.Row():
-                nm_connection_box = gr.Dropdown(choices=[], label='Connection profile')
-                refresh_nm_btn = gr.Button('Refresh')
-            gr.Markdown('### Static IPv4')
-            with gr.Row():
-                static_ip_box = gr.Textbox(label='Address', placeholder='192.168.1.50')
-                static_prefix_box = gr.Number(label='Prefix', value=24, precision=0)
-                static_gw_box = gr.Textbox(label='Gateway', placeholder='192.168.1.1')
-                static_dns_box = gr.Textbox(label='DNS', placeholder='192.168.1.1')
-            with gr.Row():
-                apply_static_btn = gr.Button('Apply static')
-                apply_dhcp_btn = gr.Button('Use DHCP')
-            static_msg = gr.Textbox(label='IPv4 result', interactive=False)
-            gr.Markdown('### Wi‑Fi')
-            with gr.Row():
-                wifi_ssid_box = gr.Textbox(label='SSID')
-                wifi_password_box = gr.Textbox(label='Password', type='password')
-                wifi_iface_box = gr.Dropdown(choices=['wlan0', 'wlan1'], value='wlan0', label='Interface')
-            with gr.Row():
-                wifi_scan_btn = gr.Button('Scan')
-                wifi_connect_btn = gr.Button('Connect', variant='primary')
-            wifi_table = gr.Dataframe(
-                headers=['in_use', 'ssid', 'signal', 'security'],
-                interactive=False,
-                label='Networks',
-            )
-            wifi_msg = gr.Textbox(label='Wi‑Fi result', interactive=False)
+        with gr.Tab('Configuration'):
+            cfg_load_outputs = build_configuration_tab(node)
 
         # Wiring
         for btn, action in [(service_start_btn, 'start'), (service_stop_btn, 'stop'), (service_restart_btn, 'restart')]:
@@ -216,16 +185,6 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
         for (label, byte_val), btn in zip(PANEL_COMMANDS.items(), panel_btns):
             btn.click(lambda b=byte_val: node.ui_e720_send_byte(int(b)), outputs=[e720_cmd_message])
 
-        refresh_nm_btn.click(node.ui_refresh_nm_connections, outputs=[nm_connection_box])
-        apply_static_btn.click(
-            node.ui_apply_static_ip,
-            inputs=[nm_connection_box, static_ip_box, static_prefix_box, static_gw_box, static_dns_box],
-            outputs=[static_msg],
-        )
-        apply_dhcp_btn.click(node.ui_apply_dhcp, inputs=[nm_connection_box], outputs=[static_msg])
-        wifi_scan_btn.click(node.ui_wifi_scan, outputs=[wifi_table, wifi_msg])
-        wifi_connect_btn.click(node.ui_wifi_connect, inputs=[wifi_ssid_box, wifi_password_box, wifi_iface_box], outputs=[wifi_msg])
-
         timer = gr.Timer(value=node.status_refresh_period_sec)
         timer.tick(
             node.ui_tick_general,
@@ -235,8 +194,6 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
             node.ui_tick_experiment,
             outputs=[experiment_banner, temp_summary, measurement_table, e720_summary, e720_table, core_snapshot_box],
         )
-        timer.tick(node.ui_tick_network, outputs=[net_iface_table])
-
         demo.load(
             node.ui_tick_general,
             outputs=[ros_health_box, host_summary_box, services_table, disk_table, uart_table, net_overview_table, logs_box],
@@ -246,6 +203,6 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
             outputs=[experiment_banner, temp_summary, measurement_table, e720_summary, e720_table, core_snapshot_box],
         )
         demo.load(node.ui_refresh_programs, outputs=[programs_table, programs_message])
-        demo.load(node.ui_refresh_nm_connections, outputs=[nm_connection_box])
+        demo.load(node.ui_load_configuration, outputs=cfg_load_outputs)
 
     return demo

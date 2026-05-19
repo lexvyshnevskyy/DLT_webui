@@ -9,7 +9,7 @@ Gradio web interface for the Delatometry ROS 2 stack (replacement for legacy Del
 | **General status** | ROS health, systemd control, CPU/RAM/disk, UART devices, network overview, log |
 | **Experiment** | Run state, LTM temperatures, E7-20 live values, manual heater target |
 | **Programs** | Program CRUD, temperature steps, run/stop, DB measurement logging, E7-20 profile + keys, ZIP export |
-| **Network** | `nmcli` static IP, DHCP, Wi‑Fi scan/connect |
+| **Configuration** | Network (`nmcli`), LTM2985, E7-20, database, core, ADS1256 — edit `/etc/default/delatometry` (HMI UART is fixed on-board) |
 
 ## Features
 

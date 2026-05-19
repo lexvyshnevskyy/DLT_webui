@@ -22,6 +22,12 @@ from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
 from webui.experiment_runner import ExperimentRunner, ExperimentState, ProgramStep
 from webui.export_data import export_program_archive
 from webui.measurement_log import build_measurement_row, insert_measurement
+from webui.system_config import (
+    get_configuration_snapshot,
+    restart_service,
+    serial_port_choices,
+    write_env_file,
+)
 from webui.ui_app import build_ui
 
 CoreQuery = DatabaseQuery
@@ -411,6 +417,135 @@ class WebHMINode(Node):
 
     def ui_tick_network(self) -> List[List[Any]]:
         return network_info.interfaces_table()
+
+    def _save_env_section(
+        self,
+        updates: Dict[str, str],
+        service: str,
+        restart: bool,
+    ) -> str:
+        ok, msg = write_env_file(self.delatometry_env_file, updates)
+        if not ok:
+            return f'Failed to write {self.delatometry_env_file}: {msg}'
+        self._log(f'Configuration updated: {", ".join(updates.keys())}')
+        if not restart:
+            return f'Saved ({msg}). Restart {service} to apply.'
+        ok_r, msg_r = restart_service(service)
+        if service.endswith('webui.service'):
+            return f'Saved ({msg}). Skipped webui restart — refresh page or restart from SSH.'
+        if ok_r:
+            return f'Saved and {msg_r}.'
+        return f'Saved ({msg}) but restart failed: {msg_r}'
+
+    def ui_load_configuration(self) -> Tuple[Any, ...]:
+        snap = get_configuration_snapshot(self.delatometry_env_file)
+        ltm = snap['ltm2985']
+        meas = snap['measure_device']
+        db = snap['database']
+        core = snap['core']
+        ads = snap['ads1256']
+        status = f'Loaded {self.delatometry_env_file}' if snap.get('env_readable') else (
+            f'Warning: could not read {self.delatometry_env_file} (using defaults)'
+        )
+        nm_choices = network_info.list_nmcli_connections()
+        return (
+            status,
+            network_info.interfaces_table(),
+            gr.update(choices=nm_choices, value=nm_choices[0] if nm_choices else None),
+            gr.update(choices=serial_port_choices(ltm['port']), value=ltm['port']),
+            float(ltm['baudrate']),
+            gr.update(choices=serial_port_choices(meas['port']), value=meas['port']),
+            float(meas['speed']),
+            db['host'],
+            float(db['port']),
+            db['name'],
+            db['user'],
+            db['password'],
+            db['auto_init_schema'],
+            core['namespace'],
+            core['measurement_topic'],
+            core['enable_database_client'],
+            core['enable_pwm_controller'],
+            ads['simulate'],
+            ads['fallback_to_simulation'],
+        )
+
+    def ui_save_ltm2985_config(self, port: str, baudrate: float, restart: bool) -> Tuple[str, str]:
+        msg = self._save_env_section(
+            {
+                'DELATOMETRY_LTM2985_PORT': str(port).strip(),
+                'DELATOMETRY_LTM2985_BAUDRATE': str(int(baudrate)),
+            },
+            'delatometry-ltm2985.service',
+            bool(restart),
+        )
+        return msg, msg
+
+    def ui_save_measure_device_config(self, port: str, speed: float, restart: bool) -> Tuple[str, str]:
+        msg = self._save_env_section(
+            {
+                'DELATOMETRY_MEASURE_PORT': str(port).strip(),
+                'DELATOMETRY_MEASURE_SPEED': str(int(speed)),
+            },
+            'delatometry-measure-device.service',
+            bool(restart),
+        )
+        return msg, msg
+
+    def ui_save_database_config(
+        self,
+        host: str,
+        port: float,
+        name: str,
+        user: str,
+        password: str,
+        auto_init: bool,
+        restart: bool,
+    ) -> Tuple[str, str]:
+        msg = self._save_env_section(
+            {
+                'DELATOMETRY_DB_HOST': str(host).strip(),
+                'DELATOMETRY_DB_PORT': str(int(port)),
+                'DELATOMETRY_DB_NAME': str(name).strip(),
+                'DELATOMETRY_DB_USER': str(user).strip(),
+                'DELATOMETRY_DB_PASSWORD': str(password),
+                'DELATOMETRY_DB_AUTO_INIT_SCHEMA': 'true' if auto_init else 'false',
+            },
+            'delatometry-database.service',
+            bool(restart),
+        )
+        return msg, msg
+
+    def ui_save_core_config(
+        self,
+        namespace: str,
+        measurement_topic: str,
+        enable_db_client: bool,
+        enable_pwm: bool,
+        restart: bool,
+    ) -> Tuple[str, str]:
+        msg = self._save_env_section(
+            {
+                'DELATOMETRY_CORE_NAMESPACE': str(namespace).strip().strip('/'),
+                'DELATOMETRY_CORE_MEASUREMENT_TOPIC': str(measurement_topic).strip(),
+                'DELATOMETRY_CORE_ENABLE_DATABASE_CLIENT': 'true' if enable_db_client else 'false',
+                'DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER': 'true' if enable_pwm else 'false',
+            },
+            'delatometry-core.service',
+            bool(restart),
+        )
+        return msg, msg
+
+    def ui_save_ads1256_config(self, simulate: bool, fallback: bool, restart: bool) -> Tuple[str, str]:
+        msg = self._save_env_section(
+            {
+                'DELATOMETRY_ADS1256_SIMULATE': 'true' if simulate else 'false',
+                'DELATOMETRY_ADS1256_FALLBACK_TO_SIMULATION': 'true' if fallback else 'false',
+            },
+            'delatometry-ads1256.service',
+            bool(restart),
+        )
+        return msg, msg
 
     def ui_service_control(self, unit: str, action: str) -> str:
         if not self.enable_service_control:

@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional
 ENV_KEYS = {
     'LTM2985': 'DELATOMETRY_LTM2985_PORT',
     'E7-20 / measure_device': 'DELATOMETRY_MEASURE_PORT',
-    'HMI Nextion': 'DELATOMETRY_HMI_PORT',
 }
 
 
@@ -70,6 +69,12 @@ def uart_table(env_file: str) -> List[List[Any]]:
 
 def list_serial_devices() -> List[str]:
     candidates: List[str] = []
-    for pattern in ('/dev/ttyUSB*', '/dev/ttyACM*', '/dev/ttyAMA*', '/dev/ttyS*'):
-        candidates.extend(str(p) for p in Path('/dev').glob(pattern.name))
+    dev = Path('/dev')
+    for glob_pattern in ('ttyUSB*', 'ttyACM*', 'ttyAMA*', 'ttyS*'):
+        candidates.extend(str(p) for p in dev.glob(glob_pattern))
+    by_id = Path('/dev/serial/by-id')
+    if by_id.is_dir():
+        for entry in sorted(by_id.iterdir()):
+            if entry.is_symlink():
+                candidates.append(str(entry))
     return sorted(set(candidates))

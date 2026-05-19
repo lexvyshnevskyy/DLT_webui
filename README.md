@@ -10,6 +10,8 @@ Gradio web interface for the Delatometry ROS 2 stack (replacement for legacy Del
 | **Experiment** (`/experiment`) | Live LTM2985 temperature + E7-20 streams, manual heater |
 | **Configuration** (`/configuration`) | Network, nodes, DB test, core PWM pins, ADS1256 enable |
 
+Default HTTP port is **80** (systemd unit grants `CAP_NET_BIND_SERVICE` so the `pi` user can bind it).
+
 ## Features
 
 - **1 s auto-refresh** on Dashboard (General) and Experiment page only
@@ -35,7 +37,7 @@ source install/setup.bash
 ros2 launch webui webui.launch.py
 ```
 
-Open `http://<host>:7860`.
+Open `http://<host>/` (port 80).
 
 ## Parameters (`config/webui.params.yaml`)
 

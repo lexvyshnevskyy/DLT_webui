@@ -20,13 +20,8 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
     sweep_mode_choices = [(SWEEP_MODE_LABELS[k], k) for k in sorted(SWEEP_MODE_LABELS)]
 
     with gr.Blocks(title=node.title, theme=gr.themes.Soft()) as demo:
-        gr.Navbar(
-            value=[
-                ('Experiment', '/experiment'),
-                ('Configuration', '/configuration'),
-            ],
-            main_page_name='Dashboard',
-        )
+        # Routes from demo.route() below are added to the navbar automatically.
+        gr.Navbar(main_page_name='Dashboard')
         gr.Markdown(f'# {node.title}')
         gr.Markdown('Dashboard — General status and Programs. Live experiment data is on **Experiment**.')
 
@@ -225,11 +220,11 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
         demo.load(node.ui_tick_general, outputs=general_outputs)
         demo.load(node.ui_refresh_programs, outputs=[programs_table, programs_message])
 
-    with demo.route('Experiment', '/experiment') as experiment_page:
+    with demo.route('Experiment', 'experiment') as experiment_page:
         experiment_tick_outputs = build_experiment_page(node)
         experiment_page.load(node.ui_tick_experiment, outputs=experiment_tick_outputs)
 
-    with demo.route('Configuration', '/configuration') as configuration_page:
+    with demo.route('Configuration', 'configuration') as configuration_page:
         cfg_load_outputs = build_configuration_tab(node)
         configuration_page.load(node.ui_load_configuration, outputs=cfg_load_outputs)
 

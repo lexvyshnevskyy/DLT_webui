@@ -6,7 +6,7 @@ webui:
     measure_topic: /measure_device
     measure_command_topic: /measure_device/command
     bind_host: 0.0.0.0
-    bind_port: 7860
+    bind_port: 80
     title: Delatometry Control
     queue_enabled: false
     auth_enabled: false

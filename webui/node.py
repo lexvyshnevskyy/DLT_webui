@@ -54,7 +54,7 @@ class WebHMINode(Node):
         self.declare_parameter('measure_topic', '/measure_device')
         self.declare_parameter('measure_command_topic', '/measure_device/command')
         self.declare_parameter('bind_host', '0.0.0.0')
-        self.declare_parameter('bind_port', 7860)
+        self.declare_parameter('bind_port', 80)
         self.declare_parameter('title', 'Delatometry Control')
         self.declare_parameter('queue_enabled', False)
         self.declare_parameter('auth_enabled', False)

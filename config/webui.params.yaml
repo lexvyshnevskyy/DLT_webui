@@ -3,12 +3,30 @@ webui:
     core_service: /core/query
     database_service: /database/query
     measurement_topic: /ltm2985/measurement
+    measure_topic: /measure_device
+    measure_command_topic: /measure_device/command
     bind_host: 0.0.0.0
     bind_port: 7860
-    title: Experiment Control
+    title: Delatometry Control
     queue_enabled: false
     auth_enabled: false
     auth_user: admin
     auth_password: admin
     status_refresh_period_sec: 1.0
     control_loop_period_sec: 1.0
+    enable_measurement_logging: true
+    measurement_log_control_channel: 9
+    measurement_log_monitor_channel: 3
+    delatometry_env_file: /etc/default/delatometry
+    export_dir: ""
+    enable_service_control: true
+    network_use_sudo: true
+    systemd_units:
+      - delatometry-database.service
+      - delatometry-ltm2985.service
+      - delatometry-measure-device.service
+      - delatometry-ads1256.service
+      - delatometry-core.service
+      - delatometry-hmi.service
+      - delatometry-webui.service
+      - mariadb.service

@@ -1,27 +1,40 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import gradio as gr
 import rclpy
 from database.srv import Query as DatabaseQuery
-CoreQuery = DatabaseQuery
-from msgs.msg import Measurement
+from msgs.msg import E720, Measurement
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from std_msgs.msg import UInt8
 
+from webui.collectors import host_stats, network_config, network_info, serial_ports, systemd_ops
+from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
+from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
+from webui.experiment_runner import ExperimentRunner, ExperimentState, ProgramStep
+from webui.export_data import export_program_archive
+from webui.measurement_log import build_measurement_row, insert_measurement
+from webui.ui_app import build_ui
 
-@dataclass
-class ProgramStep:
-    step_id: int
-    t_start: float
-    t_stop: float
-    minutes: float
+CoreQuery = DatabaseQuery
+
+DEFAULT_SYSTEMD_UNITS = [
+    'delatometry-database.service',
+    'delatometry-ltm2985.service',
+    'delatometry-measure-device.service',
+    'delatometry-ads1256.service',
+    'delatometry-core.service',
+    'delatometry-hmi.service',
+    'delatometry-webui.service',
+]
 
 
 class WebHMINode(Node):
@@ -31,19 +44,31 @@ class WebHMINode(Node):
         self.declare_parameter('core_service', '/core/query')
         self.declare_parameter('database_service', '/database/query')
         self.declare_parameter('measurement_topic', '/ltm2985/measurement')
+        self.declare_parameter('measure_topic', '/measure_device')
+        self.declare_parameter('measure_command_topic', '/measure_device/command')
         self.declare_parameter('bind_host', '0.0.0.0')
         self.declare_parameter('bind_port', 7860)
-        self.declare_parameter('title', 'Experiment Control')
+        self.declare_parameter('title', 'Delatometry Control')
         self.declare_parameter('queue_enabled', False)
         self.declare_parameter('auth_enabled', False)
         self.declare_parameter('auth_user', 'admin')
         self.declare_parameter('auth_password', 'admin')
         self.declare_parameter('status_refresh_period_sec', 1.0)
         self.declare_parameter('control_loop_period_sec', 1.0)
+        self.declare_parameter('delatometry_env_file', '/etc/default/delatometry')
+        self.declare_parameter('export_dir', '')
+        self.declare_parameter('enable_service_control', True)
+        self.declare_parameter('network_use_sudo', True)
+        self.declare_parameter('enable_measurement_logging', True)
+        self.declare_parameter('measurement_log_control_channel', 9)
+        self.declare_parameter('measurement_log_monitor_channel', 3)
+        self.declare_parameter('systemd_units', DEFAULT_SYSTEMD_UNITS)
 
         self.core_service = str(self.get_parameter('core_service').value)
         self.database_service = str(self.get_parameter('database_service').value)
         self.measurement_topic = str(self.get_parameter('measurement_topic').value)
+        self.measure_topic = str(self.get_parameter('measure_topic').value)
+        self.measure_command_topic = str(self.get_parameter('measure_command_topic').value)
         self.bind_host = str(self.get_parameter('bind_host').value)
         self.bind_port = int(self.get_parameter('bind_port').value)
         self.title = str(self.get_parameter('title').value)
@@ -53,74 +78,82 @@ class WebHMINode(Node):
         self.auth_password = str(self.get_parameter('auth_password').value)
         self.status_refresh_period_sec = float(self.get_parameter('status_refresh_period_sec').value)
         self.control_loop_period_sec = float(self.get_parameter('control_loop_period_sec').value)
+        self.delatometry_env_file = str(self.get_parameter('delatometry_env_file').value)
+        self.enable_service_control = bool(self.get_parameter('enable_service_control').value)
+        self.network_use_sudo = bool(self.get_parameter('network_use_sudo').value)
+        self.enable_measurement_logging = bool(self.get_parameter('enable_measurement_logging').value)
+        self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
+        self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
+
+        export_dir = str(self.get_parameter('export_dir').value).strip()
+        self.export_dir = export_dir or str(Path(tempfile.gettempdir()) / 'delatometry_exports')
+
+        units_param = self.get_parameter('systemd_units').value
+        self.systemd_units = (
+            [str(u) for u in units_param]
+            if isinstance(units_param, (list, tuple)) and units_param
+            else list(DEFAULT_SYSTEMD_UNITS)
+        )
 
         self.core_client = self.create_client(CoreQuery, self.core_service)
         self.db_client = self.create_client(DatabaseQuery, self.database_service)
+        self._e720_cmd_pub = self.create_publisher(UInt8, self.measure_command_topic, 10)
         self.create_subscription(Measurement, self.measurement_topic, self._on_measurement, 100)
+        self.create_subscription(E720, self.measure_topic, self._on_e720, 10)
+
+        self._runner = ExperimentRunner()
+        self._sweep = E720SweepController()
+        self._experiment = ExperimentState()
 
         self._lock = threading.RLock()
         self._latest_measurements: Dict[int, Dict[str, Any]] = {}
-        self._active_program_id: Optional[int] = None
-        self._active_program_steps: List[ProgramStep] = []
-        self._active_step_index: int = 0
-        self._active_step_started_monotonic: Optional[float] = None
-        self._last_target_k: Optional[float] = None
+        self._latest_e720: Optional[E720] = None
         self._last_core_snapshot: Dict[str, Any] = {}
-        self._last_db_program_status: str = 'Idle'
-        self._log_lines: Deque[str] = deque(maxlen=200)
+        self._log_lines: Deque[str] = deque(maxlen=300)
         self._last_service_log_time: Dict[str, float] = {}
+        self._last_measurement_log_monotonic: float = 0.0
 
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
-
         self._log('webui node started')
-        self.get_logger().info(
-            f'webui ready. core_service={self.core_service}, '
-            f'database_service={self.database_service}, measurement_topic={self.measurement_topic}'
-        )
 
     def _log(self, message: str) -> None:
         stamp = time.strftime('%Y-%m-%d %H:%M:%S')
-        line = f'[{stamp}] {message}'
         with self._lock:
-            self._log_lines.appendleft(line)
+            self._log_lines.appendleft(f'[{stamp}] {message}')
         self.get_logger().info(message)
 
     def _log_throttled(self, key: str, message: str, period_sec: float = 5.0) -> None:
         now = time.monotonic()
         with self._lock:
-            last = self._last_service_log_time.get(key, 0.0)
-            if now - last < period_sec:
+            if now - self._last_service_log_time.get(key, 0.0) < period_sec:
                 return
             self._last_service_log_time[key] = now
         self._log(message)
 
-    @staticmethod
-    def _critical_message(service_name: str) -> str:
-        return f'CRITICAL: required service is not available: {service_name}'
-
-    def _critical_service_dict(self, service_name: str) -> Dict[str, Any]:
-        return {
-            'result': 'Error',
-            'severity': 'CRITICAL',
-            'error': self._critical_message(service_name),
-            'service': service_name,
-        }
-
     def _on_measurement(self, msg: Measurement) -> None:
-        payload = {
-            'channel': int(msg.channel),
-            'type': str(msg.type),
-            'value': float(msg.value),
-            'valid': bool(msg.valid),
-            'updated_monotonic': time.monotonic(),
-        }
         with self._lock:
-            self._latest_measurements[int(msg.channel)] = payload
+            self._latest_measurements[int(msg.channel)] = {
+                'channel': int(msg.channel),
+                'type': str(msg.type),
+                'value': float(msg.value),
+                'valid': bool(msg.valid),
+                'updated_monotonic': time.monotonic(),
+            }
 
-    def _call_service_json(self, client: Any, request_type: Any, service_name: str, payload: Dict[str, Any], timeout_sec: float = 5.0) -> Dict[str, Any]:
+    def _on_e720(self, msg: E720) -> None:
+        with self._lock:
+            self._latest_e720 = msg
+
+    def _call_service_json(
+        self,
+        client: Any,
+        request_type: Any,
+        service_name: str,
+        payload: Dict[str, Any],
+        timeout_sec: float = 5.0,
+    ) -> Dict[str, Any]:
         if not client.wait_for_service(timeout_sec=timeout_sec):
             raise RuntimeError(f'Service is not available: {service_name}')
-
         request = request_type()
         request.query = json.dumps(payload)
         future = client.call_async(request)
@@ -130,8 +163,7 @@ class WebHMINode(Node):
                 response = future.result()
                 if response is None:
                     raise RuntimeError(f'Service call failed: {service_name}')
-                raw = response.response or '{}'
-                return json.loads(raw)
+                return json.loads(response.response or '{}')
             time.sleep(0.02)
         raise TimeoutError(f'Timeout waiting for {service_name}')
 
@@ -146,9 +178,7 @@ class WebHMINode(Node):
 
     def _service_available(self, client: Any, timeout_sec: float = 0.05) -> bool:
         try:
-            if client.service_is_ready():
-                return True
-            return bool(client.wait_for_service(timeout_sec=timeout_sec))
+            return client.service_is_ready() or bool(client.wait_for_service(timeout_sec=timeout_sec))
         except Exception:
             return False
 
@@ -161,463 +191,509 @@ class WebHMINode(Node):
     def _critical_services_status(self) -> Dict[str, Any]:
         core_ok = self._core_available()
         db_ok = self._db_available()
-        missing: List[str] = []
-        if not core_ok:
-            missing.append(self.core_service)
-        if not db_ok:
-            missing.append(self.database_service)
+        missing = [s for s, ok in ((self.core_service, core_ok), (self.database_service, db_ok)) if not ok]
+        tc = self._last_core_snapshot.get('temperature_control') or {}
         return {
-            'core_service': self.core_service,
             'core_available': core_ok,
-            'database_service': self.database_service,
             'database_available': db_ok,
             'system_ready': core_ok and db_ok,
-            'severity': 'OK' if core_ok and db_ok else 'CRITICAL',
             'missing_required_services': missing,
+            'temperature_control_enabled': tc.get('enabled'),
+            'pwm_note': (
+                'Heater PWM disabled in core — set DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER=true'
+                if not tc and core_ok
+                else None
+            ),
         }
 
     def _database_unavailable_message(self) -> str:
-        message = self._critical_message(self.database_service)
-        self._log_throttled('database_unavailable', message)
-        return message
+        msg = f'CRITICAL: database service unavailable: {self.database_service}'
+        self._log_throttled('database_unavailable', msg)
+        return msg
 
     def _core_unavailable_message(self) -> str:
-        message = self._critical_message(self.core_service)
-        self._log_throttled('core_unavailable', message)
-        return message
+        msg = f'CRITICAL: core service unavailable: {self.core_service}'
+        self._log_throttled('core_unavailable', msg)
+        return msg
 
     def _get_program_steps(self, program_id: int) -> List[ProgramStep]:
         if not self._db_available():
             raise RuntimeError(self._database_unavailable_message())
-
         response = self._db_query({'cmd': 'program_step_list', 'id': program_id})
         if response.get('result') != 'Ok':
-            raise RuntimeError(response.get('error', 'Failed to get program steps'))
+            raise RuntimeError(response.get('error', 'Failed to load program steps'))
+        return ExperimentRunner.parse_steps(response.get('row', []))
 
-        steps: List[ProgramStep] = []
-        for raw_row in response.get('row', []):
-            parts = str(raw_row).split('^')
-            if len(parts) < 4:
-                continue
-            steps.append(
-                ProgramStep(
-                    step_id=int(parts[0]),
-                    t_start=float(parts[1]),
-                    t_stop=float(parts[2]),
-                    minutes=float(parts[3]),
-                )
-            )
-        steps.sort(key=lambda item: item.step_id)
-        return steps
+    def _load_e720_config_for_program(self, program_id: int) -> None:
+        if program_id <= 0 or not self._db_available():
+            return
+        try:
+            response = self._db_query({'cmd': 'get_e720', 'id': program_id})
+            if response.get('result') == 'Ok' and response.get('row'):
+                self._sweep.load_config(E720SweepConfig.from_db_row(response['row']))
+        except Exception as exc:
+            self._log(f'Could not load E7-20 config for program {program_id}: {exc}')
 
-    @staticmethod
-    def _interpolate_target(step: ProgramStep, elapsed_s: float) -> float:
-        duration_s = max(0.0, float(step.minutes) * 60.0)
-        if duration_s <= 0.0:
-            return float(step.t_stop)
-        alpha = min(max(elapsed_s / duration_s, 0.0), 1.0)
-        return float(step.t_start) + (float(step.t_stop) - float(step.t_start)) * alpha
+    def _publish_e720_byte(self, byte_val: int) -> None:
+        msg = UInt8()
+        msg.data = int(byte_val) & 0xFF
+        self._e720_cmd_pub.publish(msg)
+
+    def _maybe_log_measurement(self, target_k: Optional[float]) -> None:
+        if not self.enable_measurement_logging or not self._db_available():
+            return
+        with self._lock:
+            program_id = self._experiment.program_id
+            e720_msg = self._latest_e720
+            temps = dict(self._latest_measurements)
+        if program_id is None:
+            return
+        e720 = e720_from_msg(e720_msg)
+        if not e720.get('online'):
+            return
+        now = time.monotonic()
+        if now - self._last_measurement_log_monotonic < self.control_loop_period_sec * 0.9:
+            return
+        row = build_measurement_row(
+            program_id,
+            e720,
+            temps,
+            self.log_control_channel,
+            self.log_monitor_channel,
+            target_k,
+        )
+        try:
+            if insert_measurement(self._db_query, row):
+                self._last_measurement_log_monotonic = now
+        except Exception as exc:
+            self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
 
     def _control_tick(self) -> None:
         try:
             with self._lock:
-                program_id = self._active_program_id
-                if program_id is None:
-                    return
-                steps = list(self._active_program_steps)
-                step_index = self._active_step_index
-                step_started = self._active_step_started_monotonic
+                running = self._experiment.program_id is not None
+                e720_data = e720_from_msg(self._latest_e720)
 
-            if step_index >= len(steps):
-                self._finish_active_program('Finished')
+            if running:
+                sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
+                cmd = sweep_result.get('command_byte')
+                if cmd is not None:
+                    self._publish_e720_byte(int(cmd))
+
+            action = self._runner.tick(self._experiment)
+            if not action.get('active'):
+                if action.get('finished'):
+                    self._finish_active_program('Finished')
                 return
 
-            step = steps[step_index]
-            if step_started is None:
-                with self._lock:
-                    self._active_step_started_monotonic = time.monotonic()
-                step_started = self._active_step_started_monotonic
-                self._log(f'Program {program_id}: starting step {step_index + 1}/{len(steps)} (id={step.step_id})')
-
-            elapsed_s = max(0.0, time.monotonic() - float(step_started))
-            duration_s = max(0.0, float(step.minutes) * 60.0)
-            target_k = self._interpolate_target(step, elapsed_s)
-
-            self._core_query(
-                {
-                    'temperature_control': {
-                        'enabled': True,
-                        'target_k': target_k,
-                    }
-                }
-            )
-            with self._lock:
-                self._last_target_k = target_k
-                self._last_db_program_status = f'Running step {step_index + 1}/{len(steps)}'
-
-            if elapsed_s >= duration_s:
-                with self._lock:
-                    self._active_step_index += 1
-                    self._active_step_started_monotonic = time.monotonic()
-                    finished = self._active_step_index >= len(self._active_program_steps)
-                if finished:
-                    self._finish_active_program('Finished')
-                else:
-                    self._log(f'Program {program_id}: advancing to step {self._active_step_index + 1}/{len(steps)}')
+            target_k = action.get('target_k')
+            if target_k is not None:
+                self._core_query({'temperature_control': {'enabled': True, 'target_k': float(target_k)}})
+                self._experiment.last_target_k = float(target_k)
+                if action.get('step_started') or action.get('advanced_step'):
+                    pid = self._experiment.program_id
+                    step = self._experiment.step_index + 1
+                    total = len(self._experiment.steps)
+                    self._log(f'Program {pid}: step {step}/{total}, target {target_k:.2f} K')
+                self._maybe_log_measurement(float(target_k))
         except Exception as exc:
             self._log(f'Control loop error: {exc}')
 
     def _finish_active_program(self, final_status: str) -> None:
-        with self._lock:
-            program_id = self._active_program_id
-            if program_id is None:
-                return
+        program_id = self._experiment.program_id
+        if program_id is None:
+            return
         try:
             self._core_query({'temperature_control': {'enabled': False}})
         except Exception as exc:
-            self._log(f'Failed to disable control for program {program_id}: {exc}')
+            self._log(f'Failed to disable control: {exc}')
         try:
             self._db_query({'cmd': 'program_update_status', 'id': program_id, 'status': final_status})
         except Exception as exc:
-            self._log(f'Failed to update DB status for program {program_id}: {exc}')
-        with self._lock:
-            self._active_program_id = None
-            self._active_program_steps = []
-            self._active_step_index = 0
-            self._active_step_started_monotonic = None
-            self._last_db_program_status = final_status
-        self._log(f'Program {program_id} ended with status={final_status}')
+            self._log(f'Failed to update program status: {exc}')
+        self._experiment = ExperimentState()
+        self._sweep.reset()
+        self._log(f'Program {program_id} ended: {final_status}')
 
-    def _current_status_dict(self) -> Dict[str, Any]:
-        with self._lock:
-            measurements = dict(self._latest_measurements)
-            active_program_id = self._active_program_id
-            step_index = self._active_step_index
-            step_count = len(self._active_program_steps)
-            last_target_k = self._last_target_k
-            last_db_program_status = self._last_db_program_status
-            core_snapshot = dict(self._last_core_snapshot)
-        return {
-            'active_program_id': active_program_id,
-            'program_status': last_db_program_status,
-            'active_step_index': step_index + 1 if active_program_id is not None and step_count > 0 else 0,
-            'step_count': step_count,
-            'last_target_k': last_target_k,
-            'measurements': measurements,
-            'core': core_snapshot,
-        }
+    def _experiment_banner(self) -> str:
+        exp = self._experiment
+        if exp.program_id is None:
+            return f'Idle — last status: {exp.status}'
+        step = exp.step_index + 1
+        total = len(exp.steps)
+        target = exp.last_target_k
+        mode = SWEEP_MODE_LABELS.get(self._sweep.config.mode, 'unknown')
+        return (
+            f'RUNNING program {exp.program_id} — step {step}/{total}, '
+            f'target {target:.2f} K, E7-20 mode: {mode}'
+            if target is not None
+            else f'RUNNING program {exp.program_id} — step {step}/{total}, E7-20 mode: {mode}'
+        )
 
     def _measurements_table(self) -> List[List[Any]]:
         now = time.monotonic()
-        rows: List[List[Any]] = []
         with self._lock:
             items = sorted(self._latest_measurements.items())
-        for channel, item in items:
-            age_s = max(0.0, now - float(item['updated_monotonic']))
-            rows.append([
-                channel,
-                item.get('type'),
-                item.get('value'),
-                item.get('valid'),
-                round(age_s, 3),
-            ])
-        return rows
+        return [
+            [ch, item['type'], item['value'], item['valid'], round(max(0.0, now - item['updated_monotonic']), 3)]
+            for ch, item in items
+        ]
 
     def _programs_table(self) -> List[List[Any]]:
         if not self._db_available():
-            self._database_unavailable_message()
             return []
-
         response = self._db_query({'cmd': 'program_all_list'})
         if response.get('result') != 'Ok':
-            self._log(f'CRITICAL: failed to get programs from database: {response.get("error", "unknown error")}')
             return []
-
-        rows: List[List[Any]] = []
+        rows = []
         for raw_row in response.get('row', []):
             parts = str(raw_row).split('^')
-            if len(parts) < 3:
-                continue
-            rows.append([int(parts[0]), parts[1], parts[2]])
+            if len(parts) >= 3:
+                rows.append([int(parts[0]), parts[1], parts[2]])
         return rows
 
     def _steps_table(self, program_id: int) -> List[List[Any]]:
-        if not self._db_available():
-            self._database_unavailable_message()
-            return []
+        return [[s.step_id, s.t_start, s.t_stop, s.minutes] for s in self._get_program_steps(program_id)]
 
-        rows: List[List[Any]] = []
-        for step in self._get_program_steps(program_id):
-            rows.append([step.step_id, step.t_start, step.t_stop, step.minutes])
-        return rows
+    def _temperature_summary(self) -> str:
+        status = self._critical_services_status()
+        tc = self._last_core_snapshot.get('temperature_control') or {}
+        lines = [
+            f'ROS ready: {status.get("system_ready")}',
+            f'Control enabled: {tc.get("enabled", "—")}',
+            f'Target K: {tc.get("target_k", "—")}',
+            f'Heater output: {tc.get("heater_output", "—")}',
+            f'Control temp K: {tc.get("latest_control_temp_k", "—")}',
+            f'Monitor temp K: {tc.get("latest_monitor_temp_k", "—")}',
+            f'Measurement logging: {self.enable_measurement_logging}',
+        ]
+        if status.get('pwm_note'):
+            lines.append(str(status['pwm_note']))
+        return '\n'.join(str(x) for x in lines)
 
-    def ui_refresh_status(self) -> Tuple[str, List[List[Any]], str]:
-        status = self._current_status_dict()
-        summary = {
-            'critical_services': self._critical_services_status(),
-            'active_program_id': status['active_program_id'],
-            'program_status': status['program_status'],
-            'active_step_index': status['active_step_index'],
-            'step_count': status['step_count'],
-            'last_target_k': status['last_target_k'],
-            'temperature_control': status.get('core', {}).get('temperature_control'),
-        }
-        log_text = '\n'.join(list(self._log_lines))
-        return json.dumps(summary, indent=2), self._measurements_table(), log_text
+    # --- UI handlers ---
+    def ui_tick_general(self) -> Tuple[Any, ...]:
+        host = host_stats.collect_host_stats()
+        host_summary = (
+            {
+                'cpu_percent': host.get('cpu_percent'),
+                'load_avg': host.get('load_avg'),
+                'memory_percent': host.get('memory_percent'),
+                'memory_used_gb': host.get('memory_used_gb'),
+                'memory_total_gb': host.get('memory_total_gb'),
+            }
+            if host.get('available')
+            else {'error': host.get('error')}
+        )
+        return (
+            self._critical_services_status(),
+            host_summary,
+            systemd_ops.units_table(self.systemd_units),
+            host.get('disk_rows', []),
+            serial_ports.uart_table(self.delatometry_env_file),
+            network_info.interfaces_table(),
+            '\n'.join(list(self._log_lines)),
+        )
+
+    def ui_tick_experiment(self) -> Tuple[Any, ...]:
+        with self._lock:
+            e720_msg = self._latest_e720
+        e720_data = e720_from_msg(e720_msg)
+        core_json = json.dumps(self._last_core_snapshot.get('temperature_control') or {}, indent=2)
+        return (
+            self._experiment_banner(),
+            self._temperature_summary(),
+            self._measurements_table(),
+            e720_summary_text(e720_data),
+            [e720_table_row(e720_data)],
+            core_json,
+        )
+
+    def ui_tick_network(self) -> List[List[Any]]:
+        return network_info.interfaces_table()
+
+    def ui_service_control(self, unit: str, action: str) -> str:
+        if not self.enable_service_control:
+            return 'Service control disabled (enable_service_control:=true).'
+        if 'delatometry-webui.service' in str(unit) and action == 'restart':
+            return 'Restart webui from SSH to avoid dropping this browser session.'
+        result = systemd_ops.control_unit(str(unit), action, use_sudo=True)
+        message = f'{action} {unit}: {"OK" if result["ok"] else "FAILED"}'
+        if result.get('error'):
+            message += f' — {result["error"]}'
+        self._log(message)
+        return message
 
     def ui_refresh_programs(self) -> Tuple[List[List[Any]], str]:
         if not self._db_available():
-            message = self._database_unavailable_message()
-            return [], message
-
+            return [], self._database_unavailable_message()
         rows = self._programs_table()
-        return rows, f'Loaded {len(rows)} program(s).'
+        return rows, f'{len(rows)} program(s).'
 
-    def ui_load_program(self, program_id: float) -> Tuple[List[List[Any]], str]:
+    def ui_load_program(self, program_id: float) -> Tuple[List[List[Any]], str, str]:
         if not self._db_available():
-            message = self._database_unavailable_message()
-            return [], message
-
+            return [], self._database_unavailable_message(), ''
         program_id_int = int(program_id)
         try:
             rows = self._steps_table(program_id_int)
-            return rows, f'Loaded {len(rows)} step(s) for program {program_id_int}.'
+            self._load_e720_config_for_program(program_id_int)
+            stats = self._db_query({'cmd': 'measurement_stats', 'program_id': program_id_int})
+            stats_txt = json.dumps(stats.get('row', stats), indent=2)
+            return rows, f'{len(rows)} step(s) for program {program_id_int}.', stats_txt
         except Exception as exc:
-            message = f'ERROR: failed to load program {program_id_int}: {exc}'
-            self._log(message)
-            return [], message
+            return [], f'ERROR: {exc}', ''
 
     def ui_create_program(self) -> Tuple[float, List[List[Any]], str]:
         if not self._db_available():
-            message = self._database_unavailable_message()
-            return 0.0, [], message
-
+            return 0.0, [], self._database_unavailable_message()
         try:
             response = self._db_query({'cmd': 'new_program'})
             if response.get('result') != 'Ok':
-                message = f'ERROR: failed to create program: {response.get("error", "unknown error")}'
-                self._log(message)
-                return 0.0, self._programs_table(), message
+                return 0.0, self._programs_table(), f'ERROR: {response.get("error", "unknown")}'
             program_id = int(response.get('ID', 0))
             self._log(f'Created program {program_id}')
             return float(program_id), self._programs_table(), f'Created program {program_id}.'
         except Exception as exc:
-            message = f'ERROR: failed to create program: {exc}'
-            self._log(message)
-            return 0.0, [], message
+            return 0.0, [], f'ERROR: {exc}'
+
+    def ui_duplicate_program(self, program_id: float) -> Tuple[float, List[List[Any]], str]:
+        if not self._db_available():
+            return 0.0, [], self._database_unavailable_message()
+        source_id = int(program_id)
+        if source_id <= 0:
+            return 0.0, self._programs_table(), 'Select a program to duplicate.'
+        try:
+            created = self._db_query({'cmd': 'new_program'})
+            if created.get('result') != 'Ok':
+                return 0.0, self._programs_table(), 'Failed to create new program.'
+            new_id = int(created.get('ID', 0))
+            for step in self._get_program_steps(source_id):
+                self._db_query({
+                    'cmd': 'program_step_insert',
+                    'program_id': new_id,
+                    't_start': step.t_start,
+                    't_stop': step.t_stop,
+                    'minutes': step.minutes,
+                })
+            e720 = self._db_query({'cmd': 'get_e720', 'id': source_id})
+            if e720.get('result') == 'Ok' and e720.get('row'):
+                row = dict(e720['row'])
+                row['id'] = new_id
+                self._db_query({'cmd': 'set_e720', **row})
+            self._log(f'Duplicated program {source_id} -> {new_id}')
+            return float(new_id), self._programs_table(), f'Duplicated as program {new_id}.'
+        except Exception as exc:
+            return 0.0, [], f'ERROR: {exc}'
+
+    def ui_delete_program(self, program_id: float) -> Tuple[List[List[Any]], str, float]:
+        if not self._db_available():
+            return [], self._database_unavailable_message(), program_id
+        program_id_int = int(program_id)
+        if program_id_int <= 0:
+            return self._programs_table(), 'Invalid program ID.', program_id
+        if self._experiment.program_id == program_id_int:
+            return self._programs_table(), 'Stop the running program first.', program_id
+        try:
+            response = self._db_query({'cmd': 'program_delete_by_id', 'id': program_id_int})
+            if response.get('result') != 'Ok':
+                return self._programs_table(), f'ERROR: {response.get("error", "delete failed")}', program_id
+            self._log(f'Deleted program {program_id_int}')
+            return self._programs_table(), f'Deleted program {program_id_int}.', 0.0
+        except Exception as exc:
+            return [], f'ERROR: {exc}', program_id
+
+    def ui_clear_measurements(self, program_id: float) -> str:
+        if not self._db_available():
+            return self._database_unavailable_message()
+        program_id_int = int(program_id)
+        if program_id_int <= 0:
+            return 'Select a valid program ID.'
+        try:
+            response = self._db_query({'cmd': 'measurement_delete_by_program_id', 'program_id': program_id_int})
+            count = response.get('count', 0)
+            self._log(f'Cleared {count} measurement(s) for program {program_id_int}')
+            return f'Deleted {count} measurement row(s) for program {program_id_int}.'
+        except Exception as exc:
+            return f'ERROR: {exc}'
 
     def ui_add_step(self, program_id: float, t_start: float, t_stop: float, minutes: float) -> Tuple[List[List[Any]], str]:
         if not self._db_available():
-            message = self._database_unavailable_message()
-            return [], message
-
+            return [], self._database_unavailable_message()
         program_id_int = int(program_id)
         try:
-            response = self._db_query(
-                {
-                    'cmd': 'program_step_insert',
-                    'program_id': program_id_int,
-                    't_start': float(t_start),
-                    't_stop': float(t_stop),
-                    'minutes': float(minutes),
-                }
-            )
+            response = self._db_query({
+                'cmd': 'program_step_insert',
+                'program_id': program_id_int,
+                't_start': float(t_start),
+                't_stop': float(t_stop),
+                'minutes': float(minutes),
+            })
             if response.get('result') != 'Ok':
-                message = f'ERROR: failed to add step: {response.get("error", "unknown error")}'
-                self._log(message)
-                return self._steps_table(program_id_int), message
-            self._log(f'Program {program_id_int}: added step t_start={t_start}, t_stop={t_stop}, minutes={minutes}')
-            return self._steps_table(program_id_int), f'Added step to program {program_id_int}.'
+                return self._steps_table(program_id_int), f'ERROR: {response.get("error", "unknown")}'
+            return self._steps_table(program_id_int), 'Step added.'
         except Exception as exc:
-            message = f'ERROR: failed to add step to program {program_id_int}: {exc}'
-            self._log(message)
-            return [], message
+            return [], f'ERROR: {exc}'
 
     def ui_delete_step(self, program_id: float, step_id: float) -> Tuple[List[List[Any]], str]:
         if not self._db_available():
-            message = self._database_unavailable_message()
-            return [], message
-
+            return [], self._database_unavailable_message()
         program_id_int = int(program_id)
-        step_id_int = int(step_id)
         try:
-            response = self._db_query({'cmd': 'program_delete_temp', 'id': step_id_int})
+            response = self._db_query({'cmd': 'program_delete_temp', 'id': int(step_id)})
             if response.get('result') != 'Ok':
-                message = f'ERROR: failed to delete step {step_id_int}: {response.get("error", "unknown error")}'
-                self._log(message)
-                return self._steps_table(program_id_int), message
-            self._log(f'Program {program_id_int}: deleted step {step_id_int}')
-            return self._steps_table(program_id_int), f'Deleted step {step_id_int}.'
+                return self._steps_table(program_id_int), f'ERROR: {response.get("error", "unknown")}'
+            return self._steps_table(program_id_int), f'Deleted step {int(step_id)}.'
         except Exception as exc:
-            message = f'ERROR: failed to delete step {step_id_int}: {exc}'
-            self._log(message)
-            return [], message
+            return [], f'ERROR: {exc}'
 
-    def ui_start_program(self, program_id: float) -> str:
+    def ui_save_e720_config(
+        self,
+        program_id: float,
+        mode: float,
+        enabled_freqs: List[str],
+        range_max: float,
+    ) -> str:
         if not self._db_available():
             return self._database_unavailable_message()
-        if not self._core_available():
-            return self._core_unavailable_message()
+        program_id_int = int(program_id)
+        if program_id_int <= 0:
+            return 'Select a valid program ID.'
+        freqs = {int(float(x)) for x in (enabled_freqs or [])}
+        if not freqs:
+            freqs = {1000}
+        config = E720SweepConfig(
+            mode=int(mode),
+            enabled_frequencies=freqs,
+            range_min_hz=min(freqs),
+            range_max_hz=float(range_max),
+        )
+        self._sweep.load_config(config)
+        try:
+            payload = config.to_db_payload(program_id_int)
+            response = self._db_query({'cmd': 'set_e720', **payload})
+            if response.get('result') != 'Ok':
+                return f'ERROR: {response.get("error", "save failed")}'
+            self._log(f'Saved E7-20 sweep config for program {program_id_int}')
+            return f'Saved E7-20 config: {SWEEP_MODE_LABELS.get(config.mode, mode)}.'
+        except Exception as exc:
+            return f'ERROR: {exc}'
 
+    def ui_start_program(self, program_id: float) -> Tuple[str, str]:
+        if not self._db_available():
+            return self._database_unavailable_message(), self._experiment_banner()
+        if not self._core_available():
+            return self._core_unavailable_message(), self._experiment_banner()
         program_id_int = int(program_id)
         try:
             steps = self._get_program_steps(program_id_int)
             if not steps:
-                message = f'ERROR: program {program_id_int} has no steps.'
-                self._log(message)
-                return message
-
-            with self._lock:
-                already_running = self._active_program_id is not None
-            if already_running:
-                return 'ERROR: another program is already running. Stop it first.'
-
+                return f'Program {program_id_int} has no steps.', self._experiment_banner()
+            if self._experiment.program_id is not None:
+                return 'Another program is already running.', self._experiment_banner()
+            self._load_e720_config_for_program(program_id_int)
             first_target_k = float(steps[0].t_start)
-            self._core_query(
-                {
-                    'temperature_control': {
-                        'enabled': True,
-                        'target_k': first_target_k,
-                        'reset_integral': True,
-                    }
-                }
-            )
+            self._core_query({
+                'temperature_control': {'enabled': True, 'target_k': first_target_k, 'reset_integral': True},
+            })
             self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Running'})
-            with self._lock:
-                self._active_program_id = program_id_int
-                self._active_program_steps = steps
-                self._active_step_index = 0
-                self._active_step_started_monotonic = None
-                self._last_db_program_status = 'Running'
-                self._last_target_k = first_target_k
-            self._log(f'Program {program_id_int} started with {len(steps)} step(s).')
-            return f'Program {program_id_int} started.'
+            self._experiment = ExperimentState(
+                program_id=program_id_int,
+                steps=steps,
+                step_index=0,
+                step_started_monotonic=None,
+                status='Running',
+                last_target_k=first_target_k,
+            )
+            self._sweep.reset()
+            self._last_measurement_log_monotonic = 0.0
+            self._log(f'Started program {program_id_int} ({len(steps)} steps)')
+            return f'Program {program_id_int} started.', self._experiment_banner()
         except Exception as exc:
-            message = f'ERROR: failed to start program {program_id_int}: {exc}'
-            self._log(message)
-            return message
+            return f'ERROR: {exc}', self._experiment_banner()
 
-    def ui_stop_program(self) -> str:
-        if not self._core_available():
-            message = self._core_unavailable_message()
-            with self._lock:
-                has_active_program = self._active_program_id is not None
-            if has_active_program:
-                return message + '; local program state was NOT cleared because heater control could not be disabled.'
-            return message
-
-        with self._lock:
-            program_id = self._active_program_id
+    def ui_stop_program(self) -> Tuple[str, str]:
+        if not self._core_available() and self._experiment.program_id is not None:
+            return self._core_unavailable_message(), self._experiment_banner()
+        program_id = self._experiment.program_id
         if program_id is None:
             try:
                 self._core_query({'temperature_control': {'enabled': False}})
-                with self._lock:
-                    self._last_db_program_status = 'Stopped'
-                return 'No active program. Temperature control disabled.'
+                return 'No active program. Control disabled.', self._experiment_banner()
             except Exception as exc:
-                message = f'ERROR: failed to disable temperature control: {exc}'
-                self._log(message)
-                return message
+                return f'ERROR: {exc}', self._experiment_banner()
         self._finish_active_program('Stopped')
-        return f'Program {program_id} stopped.'
+        return f'Program {program_id} stopped.', self._experiment_banner()
 
     def ui_manual_target(self, target_k: float, enabled: bool) -> str:
         if not self._core_available():
-            message = self._core_unavailable_message()
-            return json.dumps(self._critical_service_dict(self.core_service), indent=2)
-
+            return json.dumps({'error': self._core_unavailable_message()}, indent=2)
         try:
-            response = self._core_query({'temperature_control': {'enabled': bool(enabled), 'target_k': float(target_k)}})
-            snapshot = response.get('temperature_control')
-            self._log(f'Manual target update: enabled={enabled}, target_k={target_k}')
-            return json.dumps(snapshot, indent=2)
+            response = self._core_query({
+                'temperature_control': {'enabled': bool(enabled), 'target_k': float(target_k)},
+            })
+            return json.dumps(response.get('temperature_control') or {}, indent=2)
         except Exception as exc:
-            message = f'ERROR: failed to apply manual target: {exc}'
-            self._log(message)
-            return json.dumps({'result': 'Error', 'severity': 'CRITICAL', 'error': message}, indent=2)
+            return json.dumps({'error': str(exc)}, indent=2)
+
+    def ui_export_program(self, program_id: float, limit: float, clear_first: bool) -> Tuple[Optional[str], str]:
+        if not self._db_available():
+            return None, self._database_unavailable_message()
+        program_id_int = int(program_id)
+        if program_id_int <= 0:
+            return None, 'Select a valid program ID.'
+        try:
+            if clear_first:
+                self._db_query({'cmd': 'measurement_delete_by_program_id', 'program_id': program_id_int})
+            result = export_program_archive(self._db_query, program_id_int, self.export_dir, limit=int(limit))
+            if not result.get('ok'):
+                return None, result.get('error', 'export failed')
+            self._log(f'Exported program {program_id_int} -> {result["zip_path"]}')
+            return result['zip_path'], (
+                f'Export OK: {result["measurement_count"]} measurements, {result["step_count"]} steps.'
+            )
+        except Exception as exc:
+            return None, f'ERROR: {exc}'
+
+    def ui_e720_send_byte(self, byte_val: int) -> str:
+        byte_val = int(byte_val) & 0xFF
+        self._publish_e720_byte(byte_val)
+        self._log(f'E7-20 command: byte {byte_val}')
+        return f'Sent byte {byte_val} on {self.measure_command_topic}'
+
+    def ui_refresh_nm_connections(self):
+        choices = network_info.list_nmcli_connections()
+        return gr.update(choices=choices, value=choices[0] if choices else None)
+
+    def ui_apply_static_ip(self, connection: str, address: str, prefix: float, gateway: str, dns: str) -> str:
+        result = network_config.set_ipv4(
+            str(connection), str(address).strip(), int(prefix), str(gateway), str(dns),
+            use_sudo=self.network_use_sudo,
+        )
+        msg = 'OK' if result.get('ok') else result.get('error', 'failed')
+        self._log(f'Static IP {connection}: {msg}')
+        return msg
+
+    def ui_apply_dhcp(self, connection: str) -> str:
+        result = network_config.set_dhcp(str(connection), use_sudo=self.network_use_sudo)
+        msg = 'OK' if result.get('ok') else result.get('error', 'failed')
+        self._log(f'DHCP {connection}: {msg}')
+        return msg
+
+    def ui_wifi_scan(self) -> Tuple[List[List[Any]], str]:
+        result = network_config.wifi_scan()
+        if not result.get('ok'):
+            return [], result.get('error', 'scan failed')
+        rows = result.get('rows', [])
+        return rows, f'Found {len(rows)} network(s).'
+
+    def ui_wifi_connect(self, ssid: str, password: str, interface: str) -> str:
+        result = network_config.wifi_connect(ssid, password, str(interface), use_sudo=self.network_use_sudo)
+        msg = 'Connected' if result.get('ok') else result.get('error', 'failed')
+        self._log(f'Wi-Fi {ssid}: {msg}')
+        return msg
 
     def build_ui(self) -> gr.Blocks:
-        with gr.Blocks(title=self.title) as demo:
-            gr.Markdown(f'# {self.title}')
-            with gr.Tab('Status'):
-                status_box = gr.Code(label='Experiment status', language='json')
-                measurement_table = gr.Dataframe(
-                    headers=['channel', 'type', 'value', 'valid', 'age_s'],
-                    datatype=['number', 'str', 'number', 'bool', 'number'],
-                    interactive=False,
-                    label='Latest measurements',
-                )
-                logs_box = gr.Textbox(label='Logs', lines=12, interactive=False)
-                refresh_status_btn = gr.Button('Refresh status')
-
-            with gr.Tab('Programs'):
-                program_id_box = gr.Number(label='Program ID', precision=0, value=0)
-                programs_table = gr.Dataframe(
-                    headers=['id', 'datetime', 'status'],
-                    datatype=['number', 'str', 'str'],
-                    interactive=False,
-                    label='Programs',
-                )
-                programs_message = gr.Textbox(label='Programs message', interactive=False)
-                with gr.Row():
-                    create_program_btn = gr.Button('Create program')
-                    refresh_programs_btn = gr.Button('Refresh programs')
-                    load_program_btn = gr.Button('Load selected program')
-                steps_table = gr.Dataframe(
-                    headers=['step_id', 't_start_k', 't_stop_k', 'minutes'],
-                    datatype=['number', 'number', 'number', 'number'],
-                    interactive=False,
-                    label='Program steps',
-                )
-                steps_message = gr.Textbox(label='Steps message', interactive=False)
-                with gr.Row():
-                    t_start_box = gr.Number(label='T start [K]', value=300.0)
-                    t_stop_box = gr.Number(label='T stop [K]', value=350.0)
-                    minutes_box = gr.Number(label='Minutes', value=10.0)
-                with gr.Row():
-                    add_step_btn = gr.Button('Add step')
-                    delete_step_id_box = gr.Number(label='Delete step ID', precision=0, value=0)
-                    delete_step_btn = gr.Button('Delete step')
-
-            with gr.Tab('Control'):
-                start_btn = gr.Button('Start selected program', variant='primary')
-                stop_btn = gr.Button('Stop active program', variant='stop')
-                control_message = gr.Textbox(label='Control message', interactive=False)
-                gr.Markdown('### Manual control')
-                with gr.Row():
-                    manual_enabled_box = gr.Checkbox(label='Enable control', value=False)
-                    manual_target_box = gr.Number(label='Target [K]', value=350.0)
-                manual_apply_btn = gr.Button('Apply manual target')
-                manual_snapshot_box = gr.Code(label='Core control snapshot', language='json')
-
-            refresh_status_btn.click(self.ui_refresh_status, outputs=[status_box, measurement_table, logs_box])
-            refresh_programs_btn.click(self.ui_refresh_programs, outputs=[programs_table, programs_message])
-            create_program_btn.click(self.ui_create_program, outputs=[program_id_box, programs_table, programs_message])
-            load_program_btn.click(self.ui_load_program, inputs=[program_id_box], outputs=[steps_table, steps_message])
-            add_step_btn.click(
-                self.ui_add_step,
-                inputs=[program_id_box, t_start_box, t_stop_box, minutes_box],
-                outputs=[steps_table, steps_message],
-            )
-            delete_step_btn.click(
-                self.ui_delete_step,
-                inputs=[program_id_box, delete_step_id_box],
-                outputs=[steps_table, steps_message],
-            )
-            start_btn.click(self.ui_start_program, inputs=[program_id_box], outputs=[control_message])
-            stop_btn.click(self.ui_stop_program, outputs=[control_message])
-            manual_apply_btn.click(
-                self.ui_manual_target,
-                inputs=[manual_target_box, manual_enabled_box],
-                outputs=[manual_snapshot_box],
-            )
-
-            demo.load(self.ui_refresh_status, outputs=[status_box, measurement_table, logs_box])
-            demo.load(self.ui_refresh_programs, outputs=[programs_table, programs_message])
-            timer = gr.Timer(value=self.status_refresh_period_sec)
-            timer.tick(self.ui_refresh_status, outputs=[status_box, measurement_table, logs_box])
-
-        return demo
+        return build_ui(self)
 
     def launch_ui(self) -> None:
         demo = self.build_ui()
@@ -633,7 +709,7 @@ class WebHMINode(Node):
             launch_kwargs['auth'] = (self.auth_user, self.auth_password)
         if self.queue_enabled:
             demo.queue()
-        self._log(f'Launching Gradio UI on http://{self.bind_host}:{self.bind_port}')
+        self._log(f'UI at http://{self.bind_host}:{self.bind_port}')
         demo.launch(**launch_kwargs)
 
 
@@ -642,17 +718,15 @@ def main(args: Optional[List[str]] = None) -> None:
     node = WebHMINode()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
-
-    executor_thread = threading.Thread(target=executor.spin, daemon=True)
-    executor_thread.start()
-
+    thread = threading.Thread(target=executor.spin, daemon=True)
+    thread.start()
     try:
         node.launch_ui()
     finally:
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
-        executor_thread.join(timeout=2.0)
+        thread.join(timeout=2.0)
 
 
 if __name__ == '__main__':

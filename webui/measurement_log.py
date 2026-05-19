@@ -28,4 +28,4 @@ def build_measurement_row(
 
 def insert_measurement(db_query: DbQueryFn, row: Dict[str, Any]) -> bool:
     response = db_query({'cmd': 'measurement_insert', **row})
-    return response.get('result') in ('Ok', 'False') and int(response.get('ID', 0) or 0) > 0
+    return str(response.get('result', '')).lower() == 'ok' and int(response.get('ID', 0) or 0) > 0

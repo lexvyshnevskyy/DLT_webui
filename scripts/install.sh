@@ -34,7 +34,7 @@ source "$ROS_SETUP"
 
 cd "$WORKSPACE"
 
-colcon build --symlink-install --packages-select webui
+colcon build --symlink-install --packages-select measure_device webui
 
 # shellcheck disable=SC1091
 source "$WORKSPACE/install/setup.bash"
@@ -50,3 +50,6 @@ echo "  source $ROS_SETUP"
 echo "  source $WORKSPACE/install/setup.bash"
 echo "  source $VENV_DIR/bin/activate"
 echo "  ros2 launch webui webui.launch.py"
+echo
+echo "Optional (service control + Wi-Fi/IP from UI):"
+echo "  sudo bash $WORKSPACE/src/webui/scripts/install_sudoers.sh"

@@ -15,8 +15,13 @@ install -m 0440 /dev/stdin "$SUDOERS_FILE" <<EOF
 ${RUN_USER} ALL=(root) NOPASSWD: /bin/systemctl start delatometry-*, \\
   /bin/systemctl stop delatometry-*, \\
   /bin/systemctl restart delatometry-*, \\
+  /bin/systemctl enable delatometry-*, \\
+  /bin/systemctl disable delatometry-*, \\
   /bin/systemctl is-active delatometry-*, \\
+  /bin/systemctl is-enabled delatometry-*, \\
   /bin/systemctl show delatometry-*, \\
+  /usr/bin/tee /etc/default/delatometry, \\
+  /usr/bin/cat /etc/default/delatometry, \\
   /usr/bin/nmcli
 EOF
 

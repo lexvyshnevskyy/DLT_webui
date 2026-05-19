@@ -2,18 +2,17 @@
 
 Gradio web interface for the Delatometry ROS 2 stack (replacement for legacy Delphi UI + new operational tools).
 
-## Tabs
+## Pages
 
-| Tab | Purpose |
-|-----|---------|
-| **General status** | ROS health, systemd control, CPU/RAM/disk, UART devices, network overview, log |
-| **Experiment** | Run state, LTM temperatures, E7-20 live values, manual heater target |
-| **Programs** | Program CRUD, temperature steps, run/stop, DB measurement logging, E7-20 profile + keys, ZIP export |
-| **Configuration** | Network (`nmcli`), LTM2985, E7-20, database, core, ADS1256 — edit `/etc/default/delatometry` (HMI UART is fixed on-board) |
+| Page | Purpose |
+|------|---------|
+| **Dashboard** (`/`) | General status + Programs (CRUD, run/stop, export) |
+| **Experiment** (`/experiment`) | Live LTM2985 temperature + E7-20 streams, manual heater |
+| **Configuration** (`/configuration`) | Network, nodes, DB test, core PWM pins, ADS1256 enable |
 
 ## Features
 
-- **1 s auto-refresh** on General, Experiment, and Network tabs
+- **1 s auto-refresh** on Dashboard (General) and Experiment page only
 - **Experiment runner** — multi-step temperature ramp via `/core/query`
 - **Measurement logging** — during a run, inserts rows into DB (`measurement_insert`) with E7-20 + LTM data
 - **E7-20 commands** — publishes `std_msgs/UInt8` on `/measure_device/command` (handled by `measure_device`)

@@ -11,12 +11,12 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 import gradio as gr
 import rclpy
 from database.srv import Query as DatabaseQuery
-from msgs.msg import E720, Measurement
+from msgs.msg import Ads, E720, Measurement
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import UInt8
+from std_msgs.msg import String, UInt8
 
-from webui.collectors import host_stats, network_config, network_info, serial_ports, systemd_ops
+from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
 from webui.experiment_runner import ExperimentRunner, ExperimentState, ProgramStep
@@ -28,6 +28,7 @@ from webui.system_config import (
     serial_port_choices,
     write_env_file,
 )
+from webui.ros_message import message_to_dict
 from webui.ui_app import build_ui
 
 CoreQuery = DatabaseQuery
@@ -68,6 +69,11 @@ class WebHMINode(Node):
         self.declare_parameter('enable_measurement_logging', True)
         self.declare_parameter('measurement_log_control_channel', 9)
         self.declare_parameter('measurement_log_monitor_channel', 3)
+        self.declare_parameter('ltm_raw_topic', '/ltm2985/raw_json')
+        self.declare_parameter('ads_topic', '/ads1256')
+        self.declare_parameter('stream_max_lines', 30)
+        self.declare_parameter('ltm_control_channel', 9)
+        self.declare_parameter('ltm_monitor_channel', 3)
         self.declare_parameter('systemd_units', DEFAULT_SYSTEMD_UNITS)
 
         self.core_service = str(self.get_parameter('core_service').value)
@@ -90,6 +96,11 @@ class WebHMINode(Node):
         self.enable_measurement_logging = bool(self.get_parameter('enable_measurement_logging').value)
         self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
         self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
+        self.ltm_raw_topic = str(self.get_parameter('ltm_raw_topic').value)
+        self.ads_topic = str(self.get_parameter('ads_topic').value)
+        self.stream_max_lines = int(self.get_parameter('stream_max_lines').value)
+        self.ltm_control_channel = int(self.get_parameter('ltm_control_channel').value)
+        self.ltm_monitor_channel = int(self.get_parameter('ltm_monitor_channel').value)
 
         export_dir = str(self.get_parameter('export_dir').value).strip()
         self.export_dir = export_dir or str(Path(tempfile.gettempdir()) / 'delatometry_exports')
@@ -104,8 +115,11 @@ class WebHMINode(Node):
         self.core_client = self.create_client(CoreQuery, self.core_service)
         self.db_client = self.create_client(DatabaseQuery, self.database_service)
         self._e720_cmd_pub = self.create_publisher(UInt8, self.measure_command_topic, 10)
+        stream_len = max(10, self.stream_max_lines)
         self.create_subscription(Measurement, self.measurement_topic, self._on_measurement, 100)
         self.create_subscription(E720, self.measure_topic, self._on_e720, 10)
+        self.create_subscription(String, self.ltm_raw_topic, self._on_ltm_raw, 20)
+        self.create_subscription(Ads, self.ads_topic, self._on_ads, 10)
 
         self._runner = ExperimentRunner()
         self._sweep = E720SweepController()
@@ -114,6 +128,10 @@ class WebHMINode(Node):
         self._lock = threading.RLock()
         self._latest_measurements: Dict[int, Dict[str, Any]] = {}
         self._latest_e720: Optional[E720] = None
+        self._latest_ads: Optional[Ads] = None
+        self._latest_ltm_raw: Optional[str] = None
+        self._ltm_stream: Deque[str] = deque(maxlen=stream_len)
+        self._e720_stream: Deque[str] = deque(maxlen=stream_len)
         self._last_core_snapshot: Dict[str, Any] = {}
         self._log_lines: Deque[str] = deque(maxlen=300)
         self._last_service_log_time: Dict[str, float] = {}
@@ -136,19 +154,45 @@ class WebHMINode(Node):
             self._last_service_log_time[key] = now
         self._log(message)
 
+    def _stream_stamp(self) -> str:
+        return time.strftime('%H:%M:%S')
+
     def _on_measurement(self, msg: Measurement) -> None:
+        ch = int(msg.channel)
+        mtype = str(msg.type)
+        value = float(msg.value)
+        valid = bool(msg.valid)
+        line = f'[{self._stream_stamp()}] ch={ch} {mtype}={value:.4g} valid={valid}'
         with self._lock:
-            self._latest_measurements[int(msg.channel)] = {
-                'channel': int(msg.channel),
-                'type': str(msg.type),
-                'value': float(msg.value),
-                'valid': bool(msg.valid),
+            self._latest_measurements[ch] = {
+                'channel': ch,
+                'type': mtype,
+                'value': value,
+                'valid': valid,
                 'updated_monotonic': time.monotonic(),
             }
+            if 'temperature' in mtype.lower():
+                self._ltm_stream.appendleft(line)
 
     def _on_e720(self, msg: E720) -> None:
+        data = e720_from_msg(msg)
+        line = (
+            f'[{self._stream_stamp()}] E7-20 '
+            f"{'ON' if data.get('online') else 'OFF'} "
+            f"f={data.get('frequency', 0):.3g} "
+            f"ch1={data.get('firstvalue', 0):.4g} ch2={data.get('secondvalue', 0):.4g}"
+        )
         with self._lock:
             self._latest_e720 = msg
+            self._e720_stream.appendleft(line)
+
+    def _on_ltm_raw(self, msg: String) -> None:
+        with self._lock:
+            self._latest_ltm_raw = str(msg.data)
+
+    def _on_ads(self, msg: Ads) -> None:
+        with self._lock:
+            self._latest_ads = msg
 
     def _call_service_json(
         self,
@@ -336,6 +380,10 @@ class WebHMINode(Node):
             else f'RUNNING program {exp.program_id} — step {step}/{total}, E7-20 mode: {mode}'
         )
 
+    def _is_ltm_temperature(self, item: Dict[str, Any]) -> bool:
+        mtype = str(item.get('type', '')).lower()
+        return 'temperature' in mtype
+
     def _measurements_table(self) -> List[List[Any]]:
         now = time.monotonic()
         with self._lock:
@@ -343,7 +391,40 @@ class WebHMINode(Node):
         return [
             [ch, item['type'], item['value'], item['valid'], round(max(0.0, now - item['updated_monotonic']), 3)]
             for ch, item in items
+            if self._is_ltm_temperature(item)
         ]
+
+    def _ltm_temperature_summary(self) -> str:
+        now = time.monotonic()
+        with self._lock:
+            items = dict(self._latest_measurements)
+        control = items.get(self.ltm_control_channel)
+        monitor = items.get(self.ltm_monitor_channel)
+        lines = [
+            f'Topic: {self.measurement_topic}',
+            f'Control ch {self.ltm_control_channel}: '
+            + (
+                f'{control["value"]:.4f} {control["type"]} (age {now - control["updated_monotonic"]:.1f}s)'
+                if control and self._is_ltm_temperature(control)
+                else '—'
+            ),
+            f'Monitor ch {self.ltm_monitor_channel}: '
+            + (
+                f'{monitor["value"]:.4f} {monitor["type"]} (age {now - monitor["updated_monotonic"]:.1f}s)'
+                if monitor and self._is_ltm_temperature(monitor)
+                else '—'
+            ),
+            f'All LTM temp channels: {sum(1 for v in items.values() if self._is_ltm_temperature(v))}',
+        ]
+        exp = self._experiment
+        if exp.program_id is not None:
+            lines.append(f'Program {exp.program_id} running — step {exp.step_index + 1}/{len(exp.steps)}')
+        return '\n'.join(lines)
+
+    def _stream_text(self, stream: Deque[str]) -> str:
+        with self._lock:
+            lines = list(stream)
+        return '\n'.join(lines) if lines else '(no messages yet)'
 
     def _programs_table(self) -> List[List[Any]]:
         if not self._db_available():
@@ -360,22 +441,6 @@ class WebHMINode(Node):
 
     def _steps_table(self, program_id: int) -> List[List[Any]]:
         return [[s.step_id, s.t_start, s.t_stop, s.minutes] for s in self._get_program_steps(program_id)]
-
-    def _temperature_summary(self) -> str:
-        status = self._critical_services_status()
-        tc = self._last_core_snapshot.get('temperature_control') or {}
-        lines = [
-            f'ROS ready: {status.get("system_ready")}',
-            f'Control enabled: {tc.get("enabled", "—")}',
-            f'Target K: {tc.get("target_k", "—")}',
-            f'Heater output: {tc.get("heater_output", "—")}',
-            f'Control temp K: {tc.get("latest_control_temp_k", "—")}',
-            f'Monitor temp K: {tc.get("latest_monitor_temp_k", "—")}',
-            f'Measurement logging: {self.enable_measurement_logging}',
-        ]
-        if status.get('pwm_note'):
-            lines.append(str(status['pwm_note']))
-        return '\n'.join(str(x) for x in lines)
 
     # --- UI handlers ---
     def ui_tick_general(self) -> Tuple[Any, ...]:
@@ -404,16 +469,82 @@ class WebHMINode(Node):
     def ui_tick_experiment(self) -> Tuple[Any, ...]:
         with self._lock:
             e720_msg = self._latest_e720
+            ltm_stream = self._stream_text(self._ltm_stream)
+            e720_stream = self._stream_text(self._e720_stream)
         e720_data = e720_from_msg(e720_msg)
         core_json = json.dumps(self._last_core_snapshot.get('temperature_control') or {}, indent=2)
         return (
             self._experiment_banner(),
-            self._temperature_summary(),
+            self._ltm_temperature_summary(),
             self._measurements_table(),
+            ltm_stream,
             e720_summary_text(e720_data),
             [e720_table_row(e720_data)],
+            e720_stream,
             core_json,
         )
+
+    def ui_peek_ltm_topic(self) -> str:
+        with self._lock:
+            measurements = {
+                str(ch): dict(item)
+                for ch, item in sorted(self._latest_measurements.items())
+            }
+            raw = self._latest_ltm_raw
+        payload = {
+            'measurement_topic': self.measurement_topic,
+            'raw_topic': self.ltm_raw_topic,
+            'measurements': measurements,
+            'latest_raw_json': raw,
+        }
+        return json.dumps(payload, indent=2)
+
+    def ui_peek_e720_topic(self) -> str:
+        with self._lock:
+            msg = self._latest_e720
+        return json.dumps(
+            {'topic': self.measure_topic, 'message': message_to_dict(msg)},
+            indent=2,
+            default=str,
+        )
+
+    def ui_peek_ads_topic(self) -> str:
+        with self._lock:
+            msg = self._latest_ads
+        if msg is None:
+            return json.dumps(
+                {'topic': self.ads_topic, 'message': None, 'hint': 'No message yet — is the node enabled?'},
+                indent=2,
+            )
+        return json.dumps({'topic': self.ads_topic, 'message': message_to_dict(msg)}, indent=2, default=str)
+
+    def ui_peek_hmi_topic(self) -> str:
+        with self._lock:
+            e720_msg = self._latest_e720
+            ads_msg = self._latest_ads
+        return json.dumps(
+            {
+                'note': 'HMI consumes these topics (UART is fixed on-board)',
+                'measure_topic': self.measure_topic,
+                'e720': message_to_dict(e720_msg),
+                'ads_topic': self.ads_topic,
+                'ads': message_to_dict(ads_msg),
+            },
+            indent=2,
+            default=str,
+        )
+
+    def ui_test_database_connection(
+        self,
+        host: str,
+        port: float,
+        name: str,
+        user: str,
+        password: str,
+    ) -> str:
+        ok, msg = db_test.test_database_connection(host, int(port), name, user, password)
+        self._log(f'DB test: {msg}')
+        return f'OK: {msg}' if ok else f'FAILED: {msg}'
 
     def ui_tick_network(self) -> List[List[Any]]:
         return network_info.interfaces_table()
@@ -462,10 +593,11 @@ class WebHMINode(Node):
             db['user'],
             db['password'],
             db['auto_init_schema'],
-            core['namespace'],
-            core['measurement_topic'],
+            gr.update(choices=gpio_pins.bcm_pin_choices(core['pwm_pin_ch1']), value=str(core['pwm_pin_ch1'])),
+            gr.update(choices=gpio_pins.bcm_pin_choices(core['pwm_pin_ch2']), value=str(core['pwm_pin_ch2'])),
             core['enable_database_client'],
             core['enable_pwm_controller'],
+            ads['enabled'],
             ads['simulate'],
             ads['fallback_to_simulation'],
         )
@@ -518,16 +650,16 @@ class WebHMINode(Node):
 
     def ui_save_core_config(
         self,
-        namespace: str,
-        measurement_topic: str,
+        pwm_ch1: str,
+        pwm_ch2: str,
         enable_db_client: bool,
         enable_pwm: bool,
         restart: bool,
     ) -> Tuple[str, str]:
         msg = self._save_env_section(
             {
-                'DELATOMETRY_CORE_NAMESPACE': str(namespace).strip().strip('/'),
-                'DELATOMETRY_CORE_MEASUREMENT_TOPIC': str(measurement_topic).strip(),
+                'DELATOMETRY_CORE_PWM_PIN_CH1': str(int(float(pwm_ch1))),
+                'DELATOMETRY_CORE_PWM_PIN_CH2': str(int(float(pwm_ch2))),
                 'DELATOMETRY_CORE_ENABLE_DATABASE_CLIENT': 'true' if enable_db_client else 'false',
                 'DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER': 'true' if enable_pwm else 'false',
             },
@@ -536,15 +668,32 @@ class WebHMINode(Node):
         )
         return msg, msg
 
-    def ui_save_ads1256_config(self, simulate: bool, fallback: bool, restart: bool) -> Tuple[str, str]:
-        msg = self._save_env_section(
+    def ui_save_ads1256_config(
+        self,
+        enabled: bool,
+        simulate: bool,
+        fallback: bool,
+        restart: bool,
+    ) -> Tuple[str, str]:
+        ok_env, msg_env = write_env_file(
+            self.delatometry_env_file,
             {
+                'DELATOMETRY_ADS1256_ENABLED': 'true' if enabled else 'false',
                 'DELATOMETRY_ADS1256_SIMULATE': 'true' if simulate else 'false',
                 'DELATOMETRY_ADS1256_FALLBACK_TO_SIMULATION': 'true' if fallback else 'false',
             },
-            'delatometry-ads1256.service',
-            bool(restart),
         )
+        if not ok_env:
+            return f'Failed to write env: {msg_env}', f'Failed to write env: {msg_env}'
+        ok_svc, msg_svc = gpio_pins.set_service_enabled('delatometry-ads1256.service', bool(enabled))
+        parts = [f'env: {msg_env}', f'service: {msg_svc}']
+        if bool(restart) and enabled:
+            ok_r, msg_r = restart_service('delatometry-ads1256.service')
+            parts.append(msg_r if ok_r else f'restart failed: {msg_r}')
+        elif bool(restart) and not enabled:
+            parts.append('service stopped (disabled)')
+        msg = '; '.join(parts)
+        self._log(f'ADS1256 config: {msg}')
         return msg, msg
 
     def ui_service_control(self, unit: str, action: str) -> str:

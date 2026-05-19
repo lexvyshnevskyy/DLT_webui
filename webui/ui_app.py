@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, List
 
 import gradio as gr
 
 from webui.e720_commands import PANEL_COMMANDS, command_choices
-from webui.ui_config_tab import build_configuration_tab
 from webui.e720_sweep import STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
+from webui.ui_config_tab import build_configuration_tab
+from webui.ui_experiment_page import build_experiment_page
 
 if TYPE_CHECKING:
     from webui.node import WebHMINode
@@ -19,8 +20,15 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
     sweep_mode_choices = [(SWEEP_MODE_LABELS[k], k) for k in sorted(SWEEP_MODE_LABELS)]
 
     with gr.Blocks(title=node.title, theme=gr.themes.Soft()) as demo:
+        gr.Navbar(
+            value=[
+                ('Experiment', '/experiment'),
+                ('Configuration', '/configuration'),
+            ],
+            main_page_name='Dashboard',
+        )
         gr.Markdown(f'# {node.title}')
-        gr.Markdown('Delatometry — live tabs refresh every 1 s.')
+        gr.Markdown('Dashboard — General status and Programs. Live experiment data is on **Experiment**.')
 
         with gr.Tab('General status'):
             with gr.Row():
@@ -58,32 +66,6 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
             )
             logs_box = gr.Textbox(label='Event log', lines=10, interactive=False)
 
-        with gr.Tab('Experiment'):
-            experiment_banner = gr.Textbox(label='Experiment state', interactive=False)
-            with gr.Row():
-                with gr.Column():
-                    gr.Markdown('### Temperature')
-                    temp_summary = gr.Textbox(label='Summary', lines=9, interactive=False)
-                    measurement_table = gr.Dataframe(
-                        headers=['channel', 'type', 'value', 'valid', 'age_s'],
-                        interactive=False,
-                        label='LTM channels',
-                    )
-                with gr.Column():
-                    gr.Markdown('### E7-20 RCL meter')
-                    e720_summary = gr.Textbox(label='Live values', lines=10, interactive=False)
-                    e720_table = gr.Dataframe(
-                        headers=['online', 'im', 'v1', 'sec', 'v2', 'freq', 'level', 'offset', 'range'],
-                        interactive=False,
-                        label='Snapshot',
-                    )
-            with gr.Row():
-                manual_enabled_box = gr.Checkbox(label='Manual temperature control', value=False)
-                manual_target_box = gr.Number(label='Target [K]', value=373.15)
-                manual_apply_btn = gr.Button('Apply')
-            control_message = gr.Textbox(label='Control message', interactive=False)
-            core_snapshot_box = gr.Code(label='Core control', language='json')
-
         with gr.Tab('Programs'):
             program_id_box = gr.Number(label='Program ID', precision=0, value=0)
             programs_table = gr.Dataframe(
@@ -93,6 +75,7 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
                 label='Programs',
             )
             programs_message = gr.Textbox(label='Message', interactive=False)
+            program_run_status = gr.Textbox(label='Experiment run status', interactive=False)
             program_stats_box = gr.Code(label='Measurement statistics', language='json')
             with gr.Row():
                 create_program_btn = gr.Button('New')
@@ -141,7 +124,11 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
 
             gr.Markdown('### E7-20 manual commands')
             with gr.Row():
-                e720_cmd_dropdown = gr.Dropdown(choices=command_labels, value=command_labels[0] if command_labels else None, label='Command')
+                e720_cmd_dropdown = gr.Dropdown(
+                    choices=command_labels,
+                    value=command_labels[0] if command_labels else None,
+                    label='Command',
+                )
                 e720_send_btn = gr.Button('Send')
                 e720_custom_byte = gr.Number(label='Custom byte', precision=0, value=1)
                 e720_send_custom_btn = gr.Button('Send byte')
@@ -155,54 +142,95 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
                 with panel_row:
                     panel_btns.append(gr.Button(label))
 
-        with gr.Tab('Configuration'):
-            cfg_load_outputs = build_configuration_tab(node)
+        # --- Dashboard wiring ---
+        for btn, action in [
+            (service_start_btn, 'start'),
+            (service_stop_btn, 'stop'),
+            (service_restart_btn, 'restart'),
+        ]:
+            btn.click(
+                lambda u, a=action: node.ui_service_control(u, a),
+                inputs=[service_unit_box],
+                outputs=[service_action_msg],
+            )
 
-        # Wiring
-        for btn, action in [(service_start_btn, 'start'), (service_stop_btn, 'stop'), (service_restart_btn, 'restart')]:
-            btn.click(lambda u, a=action: node.ui_service_control(u, a), inputs=[service_unit_box], outputs=[service_action_msg])
-
-        manual_apply_btn.click(node.ui_manual_target, inputs=[manual_target_box, manual_enabled_box], outputs=[core_snapshot_box])
         refresh_programs_btn.click(node.ui_refresh_programs, outputs=[programs_table, programs_message])
         create_program_btn.click(node.ui_create_program, outputs=[program_id_box, programs_table, programs_message])
-        duplicate_program_btn.click(node.ui_duplicate_program, inputs=[program_id_box], outputs=[program_id_box, programs_table, programs_message])
-        load_program_btn.click(node.ui_load_program, inputs=[program_id_box], outputs=[steps_table, steps_message, program_stats_box])
-        delete_program_btn.click(node.ui_delete_program, inputs=[program_id_box], outputs=[programs_table, programs_message, program_id_box])
-        add_step_btn.click(node.ui_add_step, inputs=[program_id_box, t_start_box, t_stop_box, minutes_box], outputs=[steps_table, steps_message])
-        delete_step_btn.click(node.ui_delete_step, inputs=[program_id_box, delete_step_id_box], outputs=[steps_table, steps_message])
-        start_btn.click(node.ui_start_program, inputs=[program_id_box], outputs=[control_message, experiment_banner])
-        stop_btn.click(node.ui_stop_program, outputs=[control_message, experiment_banner])
+        duplicate_program_btn.click(
+            node.ui_duplicate_program,
+            inputs=[program_id_box],
+            outputs=[program_id_box, programs_table, programs_message],
+        )
+        load_program_btn.click(
+            node.ui_load_program,
+            inputs=[program_id_box],
+            outputs=[steps_table, steps_message, program_stats_box],
+        )
+        delete_program_btn.click(
+            node.ui_delete_program,
+            inputs=[program_id_box],
+            outputs=[programs_table, programs_message, program_id_box],
+        )
+        add_step_btn.click(
+            node.ui_add_step,
+            inputs=[program_id_box, t_start_box, t_stop_box, minutes_box],
+            outputs=[steps_table, steps_message],
+        )
+        delete_step_btn.click(
+            node.ui_delete_step,
+            inputs=[program_id_box, delete_step_id_box],
+            outputs=[steps_table, steps_message],
+        )
+        start_btn.click(
+            node.ui_start_program,
+            inputs=[program_id_box],
+            outputs=[programs_message, program_run_status],
+        )
+        stop_btn.click(node.ui_stop_program, outputs=[programs_message, program_run_status])
         clear_meas_btn.click(node.ui_clear_measurements, inputs=[program_id_box], outputs=[clear_meas_msg])
-        export_btn.click(node.ui_export_program, inputs=[program_id_box, export_limit_box, export_clear_box], outputs=[export_file, export_message])
+        export_btn.click(
+            node.ui_export_program,
+            inputs=[program_id_box, export_limit_box, export_clear_box],
+            outputs=[export_file, export_message],
+        )
         save_e720_btn.click(
             node.ui_save_e720_config,
             inputs=[program_id_box, sweep_mode_box, enabled_freqs_box, range_max_box],
             outputs=[save_e720_msg],
         )
-
-        e720_send_btn.click(lambda l: node.ui_e720_send_byte(command_values.get(l, 1)), inputs=[e720_cmd_dropdown], outputs=[e720_cmd_message])
-        e720_send_custom_btn.click(lambda b: node.ui_e720_send_byte(int(b)), inputs=[e720_custom_byte], outputs=[e720_cmd_message])
+        e720_send_btn.click(
+            lambda l: node.ui_e720_send_byte(command_values.get(l, 1)),
+            inputs=[e720_cmd_dropdown],
+            outputs=[e720_cmd_message],
+        )
+        e720_send_custom_btn.click(
+            lambda b: node.ui_e720_send_byte(int(b)),
+            inputs=[e720_custom_byte],
+            outputs=[e720_cmd_message],
+        )
         for (label, byte_val), btn in zip(PANEL_COMMANDS.items(), panel_btns):
             btn.click(lambda b=byte_val: node.ui_e720_send_byte(int(b)), outputs=[e720_cmd_message])
 
-        timer = gr.Timer(value=node.status_refresh_period_sec)
-        timer.tick(
-            node.ui_tick_general,
-            outputs=[ros_health_box, host_summary_box, services_table, disk_table, uart_table, net_overview_table, logs_box],
-        )
-        timer.tick(
-            node.ui_tick_experiment,
-            outputs=[experiment_banner, temp_summary, measurement_table, e720_summary, e720_table, core_snapshot_box],
-        )
-        demo.load(
-            node.ui_tick_general,
-            outputs=[ros_health_box, host_summary_box, services_table, disk_table, uart_table, net_overview_table, logs_box],
-        )
-        demo.load(
-            node.ui_tick_experiment,
-            outputs=[experiment_banner, temp_summary, measurement_table, e720_summary, e720_table, core_snapshot_box],
-        )
+        general_timer = gr.Timer(value=node.status_refresh_period_sec)
+        general_outputs = [
+            ros_health_box,
+            host_summary_box,
+            services_table,
+            disk_table,
+            uart_table,
+            net_overview_table,
+            logs_box,
+        ]
+        general_timer.tick(node.ui_tick_general, outputs=general_outputs)
+        demo.load(node.ui_tick_general, outputs=general_outputs)
         demo.load(node.ui_refresh_programs, outputs=[programs_table, programs_message])
-        demo.load(node.ui_load_configuration, outputs=cfg_load_outputs)
+
+    with demo.route('Experiment', '/experiment') as experiment_page:
+        experiment_tick_outputs = build_experiment_page(node)
+        experiment_page.load(node.ui_tick_experiment, outputs=experiment_tick_outputs)
+
+    with demo.route('Configuration', '/configuration') as configuration_page:
+        cfg_load_outputs = build_configuration_tab(node)
+        configuration_page.load(node.ui_load_configuration, outputs=cfg_load_outputs)
 
     return demo

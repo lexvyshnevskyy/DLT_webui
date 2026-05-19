@@ -130,12 +130,13 @@ def get_configuration_snapshot(env_file: str) -> Dict[str, Any]:
             'auto_init_schema': env.get('DELATOMETRY_DB_AUTO_INIT_SCHEMA', 'true').lower() == 'true',
         },
         'core': {
-            'namespace': env.get('DELATOMETRY_CORE_NAMESPACE', 'core'),
-            'measurement_topic': env.get('DELATOMETRY_CORE_MEASUREMENT_TOPIC', '/ltm2985/measurement'),
             'enable_database_client': env.get('DELATOMETRY_CORE_ENABLE_DATABASE_CLIENT', 'false').lower() == 'true',
             'enable_pwm_controller': env.get('DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER', 'false').lower() == 'true',
+            'pwm_pin_ch1': int(env.get('DELATOMETRY_CORE_PWM_PIN_CH1', env.get('DELATOMETRY_CORE_PWM_PIN', '18')) or 18),
+            'pwm_pin_ch2': int(env.get('DELATOMETRY_CORE_PWM_PIN_CH2', '19') or 19),
         },
         'ads1256': {
+            'enabled': env.get('DELATOMETRY_ADS1256_ENABLED', 'false').lower() == 'true',
             'simulate': env.get('DELATOMETRY_ADS1256_SIMULATE', 'false').lower() == 'true',
             'fallback_to_simulation': env.get('DELATOMETRY_ADS1256_FALLBACK_TO_SIMULATION', 'true').lower() == 'true',
         },

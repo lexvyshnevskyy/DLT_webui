@@ -17,6 +17,11 @@ webui:
     enable_measurement_logging: true
     measurement_log_control_channel: 9
     measurement_log_monitor_channel: 3
+    ltm_raw_topic: /ltm2985/raw_json
+    ads_topic: /ads1256
+    stream_max_lines: 30
+    ltm_control_channel: 9
+    ltm_monitor_channel: 3
     delatometry_env_file: /etc/default/delatometry
     export_dir: ""
     enable_service_control: true

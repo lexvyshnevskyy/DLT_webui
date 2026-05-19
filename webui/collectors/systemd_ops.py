@@ -4,6 +4,13 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 
+# Stopping these from the web UI can kill the session or break the whole stack.
+PROTECTED_STOP_UNITS = frozenset({
+    'delatometry-webui.service',
+    'mariadb.service',
+    'mysql.service',
+})
+
 DEFAULT_UNITS = [
     'delatometry-database.service',
     'delatometry-ltm2985.service',
@@ -71,6 +78,16 @@ def control_unit(unit: str, action: str, use_sudo: bool = True) -> Dict[str, Any
         return {'ok': False, 'error': f'Unsupported action: {action}'}
     if not unit.endswith('.service'):
         unit = f'{unit}.service'
+    if action in {'stop', 'restart'} and unit in PROTECTED_STOP_UNITS:
+        return {
+            'ok': False,
+            'unit': unit,
+            'action': action,
+            'error': (
+                f'Refusing to {action} {unit} from web UI '
+                '(would disconnect this page or stop MariaDB for all nodes). Use SSH/systemctl.'
+            ),
+        }
     result = _run(['systemctl', action, unit], use_sudo=use_sudo)
     ok = result.returncode == 0
     return {

@@ -699,9 +699,16 @@ class WebHMINode(Node):
     def ui_service_control(self, unit: str, action: str) -> str:
         if not self.enable_service_control:
             return 'Service control disabled (enable_service_control:=true).'
-        if 'delatometry-webui.service' in str(unit) and action == 'restart':
-            return 'Restart webui from SSH to avoid dropping this browser session.'
-        result = systemd_ops.control_unit(str(unit), action, use_sudo=True)
+        unit_name = str(unit).strip()
+        if not unit_name.endswith('.service'):
+            unit_name = f'{unit_name}.service'
+        action_l = action.strip().lower()
+        if unit_name == 'delatometry-webui.service' and action_l in {'stop', 'restart'}:
+            return (
+                f'Cannot {action_l} delatometry-webui from this page — you are using it. '
+                'Run: sudo systemctl {action_l} delatometry-webui.service'
+            )
+        result = systemd_ops.control_unit(unit_name, action_l, use_sudo=True)
         message = f'{action} {unit}: {"OK" if result["ok"] else "FAILED"}'
         if result.get('error'):
             message += f' — {result["error"]}'
@@ -1006,10 +1013,22 @@ def main(args: Optional[List[str]] = None) -> None:
     thread.start()
     try:
         node.launch_ui()
+    except KeyboardInterrupt:
+        pass
     finally:
-        executor.shutdown()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            executor.shutdown()
+        except Exception:
+            pass
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
         thread.join(timeout=2.0)
 
 

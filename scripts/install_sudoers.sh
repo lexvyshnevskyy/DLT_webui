@@ -21,8 +21,13 @@ ${RUN_USER} ALL=(root) NOPASSWD: /bin/systemctl start delatometry-*, \\
   /bin/systemctl is-enabled delatometry-*, \\
   /bin/systemctl show delatometry-*, \\
   /usr/bin/tee /etc/default/delatometry, \\
+  /usr/bin/tee /etc/delatometry/hotspot-dnsmasq.conf, \\
   /usr/bin/cat /etc/default/delatometry, \\
-  /usr/bin/nmcli
+  /usr/bin/nmcli, \\
+  /bin/systemctl enable delatometry-hotspot-dnsmasq.service, \\
+  /bin/systemctl disable delatometry-hotspot-dnsmasq.service, \\
+  /bin/systemctl start delatometry-hotspot-dnsmasq.service, \\
+  /bin/systemctl stop delatometry-hotspot-dnsmasq.service
 EOF
 
 visudo -cf "$SUDOERS_FILE"

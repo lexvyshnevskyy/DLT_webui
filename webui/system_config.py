@@ -65,12 +65,14 @@ def write_env_file(path: str, updates: Dict[str, str]) -> Tuple[bool, str]:
             new_lines.append(f'{key}="{value}"')
 
     content = '\n'.join(new_lines).rstrip() + '\n'
-    try:
-        env_path.parent.mkdir(parents=True, exist_ok=True)
-        env_path.write_text(content, encoding='utf-8')
-        return True, 'written (user writable)'
-    except PermissionError:
-        pass
+    use_sudo_tee = str(path).startswith('/etc/') or str(path).startswith('/var/')
+    if not use_sudo_tee:
+        try:
+            env_path.parent.mkdir(parents=True, exist_ok=True)
+            env_path.write_text(content, encoding='utf-8')
+            return True, 'written (user writable)'
+        except PermissionError:
+            use_sudo_tee = True
 
     proc = subprocess.run(
         ['sudo', '-n', 'tee', path],

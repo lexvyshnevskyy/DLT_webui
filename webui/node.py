@@ -24,6 +24,7 @@ from webui.export_data import export_program_archive
 from webui.measurement_log import build_measurement_row, insert_measurement
 from webui.system_config import (
     get_configuration_snapshot,
+    read_env_file,
     restart_service,
     serial_port_choices,
     write_env_file,
@@ -126,6 +127,7 @@ class WebHMINode(Node):
         self._experiment = ExperimentState()
 
         self._lock = threading.RLock()
+        self._programs_nav_program_id = 0
         self._latest_measurements: Dict[int, Dict[str, Any]] = {}
         self._latest_e720: Optional[E720] = None
         self._latest_ads: Optional[Ads] = None
@@ -549,6 +551,95 @@ class WebHMINode(Node):
     def ui_tick_network(self) -> List[List[Any]]:
         return network_info.interfaces_table()
 
+    def _iface_summary(self, iface: str) -> str:
+        row = network_info.get_interface(iface)
+        if not row:
+            return f'{iface}: not found'
+        return (
+            f"{iface} ({row['kind']}) — {'up' if row['up'] else 'down'}, "
+            f"MAC {row['mac'] or '—'}, IPv4 {row['ipv4']}"
+        )
+
+    def _hotspot_status_text(self, iface: str = '') -> str:
+        if network_config.hotspot_is_active():
+            active = ''
+            try:
+                active = network_config.HOTSPOT_STATE_FILE.read_text(encoding='utf-8').strip()
+            except OSError:
+                pass
+            return f'Hotspot ACTIVE on {active or iface} — SSID {network_config.HOTSPOT_SSID}'
+        return 'Hotspot off'
+
+    def ui_refresh_network(self) -> Tuple[Any, ...]:
+        return (
+            network_info.interfaces_table(),
+            self._iface_summary('eth0'),
+            self._hotspot_status_text(),
+        )
+
+    def ui_select_network_interface(self, iface: str) -> Tuple[Any, ...]:
+        iface = str(iface or 'eth0').strip()
+        parsed = network_info.parse_primary_ipv4(iface)
+        info = network_info.get_interface(iface)
+        is_wifi = bool(info and info.get('kind') == 'wifi')
+        return (
+            self._iface_summary(iface),
+            parsed['address'],
+            float(parsed['prefix']),
+            gr.update(visible=is_wifi),
+            self._hotspot_status_text(iface),
+        )
+
+    def ui_net_up(self, iface: str) -> Tuple[str, List[List[Any]], str]:
+        result = network_config.set_interface_admin_state(str(iface), True, use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'net up {iface}: {msg}')
+        return msg, network_info.interfaces_table(), self._iface_summary(str(iface))
+
+    def ui_net_down(self, iface: str) -> Tuple[str, List[List[Any]], str]:
+        result = network_config.set_interface_admin_state(str(iface), False, use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'net down {iface}: {msg}')
+        return msg, network_info.interfaces_table(), self._iface_summary(str(iface))
+
+    def ui_net_dhcp(self, iface: str) -> Tuple[str, List[List[Any]], str]:
+        result = network_config.configure_interface_dhcp(str(iface), use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'net dhcp {iface}: {msg}')
+        return msg, network_info.interfaces_table(), self._iface_summary(str(iface))
+
+    def ui_net_apply_static(
+        self,
+        iface: str,
+        address: str,
+        prefix: float,
+        gateway: str,
+        dns: str,
+    ) -> Tuple[str, List[List[Any]], str]:
+        result = network_config.configure_interface_static(
+            str(iface),
+            str(address),
+            int(prefix),
+            str(gateway),
+            str(dns),
+            use_sudo=self.network_use_sudo,
+        )
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'net static {iface}: {msg}')
+        return msg, network_info.interfaces_table(), self._iface_summary(str(iface))
+
+    def ui_hotspot_enable(self, iface: str) -> Tuple[str, str, List[List[Any]]]:
+        result = network_config.enable_personal_hotspot(str(iface or 'wlan0'), use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'hotspot enable: {msg}')
+        return msg, self._hotspot_status_text(str(iface)), network_info.interfaces_table()
+
+    def ui_hotspot_disable(self) -> Tuple[str, str, List[List[Any]]]:
+        result = network_config.disable_personal_hotspot(use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'hotspot disable: {msg}')
+        return msg, self._hotspot_status_text(), network_info.interfaces_table()
+
     def _save_env_section(
         self,
         updates: Dict[str, str],
@@ -558,7 +649,14 @@ class WebHMINode(Node):
         ok, msg = write_env_file(self.delatometry_env_file, updates)
         if not ok:
             return f'Failed to write {self.delatometry_env_file}: {msg}'
-        self._log(f'Configuration updated: {", ".join(updates.keys())}')
+        saved = read_env_file(self.delatometry_env_file)
+        for key, val in updates.items():
+            if saved.get(key) != str(val):
+                return (
+                    f'Write reported success but {key} mismatch in {self.delatometry_env_file} '
+                    f'(got {saved.get(key)!r}). Check sudoers for tee.'
+                )
+        self._log(f'Configuration updated: {", ".join(updates.keys())} -> {self.delatometry_env_file}')
         if not restart:
             return f'Saved ({msg}). Restart {service} to apply.'
         ok_r, msg_r = restart_service(service)
@@ -578,11 +676,20 @@ class WebHMINode(Node):
         status = f'Loaded {self.delatometry_env_file}' if snap.get('env_readable') else (
             f'Warning: could not read {self.delatometry_env_file} (using defaults)'
         )
-        nm_choices = network_info.list_nmcli_connections()
+        ifaces = network_info.list_manageable_interfaces()
+        default_iface = 'eth0' if 'eth0' in ifaces else (ifaces[0] if ifaces else 'eth0')
+        parsed = network_info.parse_primary_ipv4(default_iface)
+        info = network_info.get_interface(default_iface)
+        is_wifi = bool(info and info.get('kind') == 'wifi')
         return (
             status,
             network_info.interfaces_table(),
-            gr.update(choices=nm_choices, value=nm_choices[0] if nm_choices else None),
+            gr.update(choices=ifaces, value=default_iface),
+            self._iface_summary(default_iface),
+            parsed['address'],
+            float(parsed['prefix']),
+            gr.update(visible=is_wifi),
+            self._hotspot_status_text(default_iface),
             gr.update(choices=serial_port_choices(ltm['port']), value=ltm['port']),
             float(ltm['baudrate']),
             gr.update(choices=serial_port_choices(meas['port']), value=meas['port']),
@@ -951,37 +1058,332 @@ class WebHMINode(Node):
         self._log(f'E7-20 command: byte {byte_val}')
         return f'Sent byte {byte_val} on {self.measure_command_topic}'
 
-    def ui_refresh_nm_connections(self):
-        choices = network_info.list_nmcli_connections()
-        return gr.update(choices=choices, value=choices[0] if choices else None)
-
-    def ui_apply_static_ip(self, connection: str, address: str, prefix: float, gateway: str, dns: str) -> str:
-        result = network_config.set_ipv4(
-            str(connection), str(address).strip(), int(prefix), str(gateway), str(dns),
-            use_sudo=self.network_use_sudo,
-        )
-        msg = 'OK' if result.get('ok') else result.get('error', 'failed')
-        self._log(f'Static IP {connection}: {msg}')
-        return msg
-
-    def ui_apply_dhcp(self, connection: str) -> str:
-        result = network_config.set_dhcp(str(connection), use_sudo=self.network_use_sudo)
-        msg = 'OK' if result.get('ok') else result.get('error', 'failed')
-        self._log(f'DHCP {connection}: {msg}')
-        return msg
-
-    def ui_wifi_scan(self) -> Tuple[List[List[Any]], str]:
-        result = network_config.wifi_scan()
+    def ui_wifi_scan(self, iface: str) -> Tuple[List[List[Any]], str]:
+        result = network_config.wifi_scan(str(iface or 'wlan0'))
         if not result.get('ok'):
             return [], result.get('error', 'scan failed')
         rows = result.get('rows', [])
         return rows, f'Found {len(rows)} network(s).'
 
-    def ui_wifi_connect(self, ssid: str, password: str, interface: str) -> str:
-        result = network_config.wifi_connect(ssid, password, str(interface), use_sudo=self.network_use_sudo)
+    def ui_wifi_connect(self, ssid: str, password: str, iface: str) -> str:
+        result = network_config.wifi_connect(
+            ssid,
+            password,
+            str(iface or 'wlan0'),
+            use_sudo=self.network_use_sudo,
+        )
         msg = 'Connected' if result.get('ok') else result.get('error', 'failed')
-        self._log(f'Wi-Fi {ssid}: {msg}')
+        self._log(f'Wi-Fi {ssid} on {iface}: {msg}')
         return msg
+
+    # --- Programs multipage UI ---
+    def ui_programs_set_nav(self, program_id: int, action: str = '') -> None:
+        with self._lock:
+            self._programs_nav_program_id = int(program_id or 0)
+        return None
+
+    def ui_programs_prepare_edit(self, program_id: Any) -> None:
+        self.ui_programs_set_nav(int(float(program_id or 0)), 'edit')
+        return None
+
+    def ui_programs_prepare_show(self, program_id: Any) -> None:
+        self.ui_programs_set_nav(int(float(program_id or 0)), 'view')
+        return None
+
+    def ui_programs_prepare_edit_from_view(self) -> None:
+        return None
+
+    def _programs_dropdown(self, rows: List[List[Any]]) -> Any:
+        choices = [str(int(row[0])) for row in rows if row]
+        return gr.update(choices=choices, value=choices[0] if choices else None)
+
+    def ui_programs_list_refresh(self) -> Tuple[Any, ...]:
+        if not self._db_available():
+            return [], self._database_unavailable_message(), gr.update(choices=[], value=None)
+        rows = self._programs_table()
+        return rows, f'{len(rows)} program(s) in database.', self._programs_dropdown(rows)
+
+    def ui_programs_delete_dialog_show(self, program_id: Any) -> Tuple[Any, str]:
+        pid = int(float(program_id or 0))
+        if pid <= 0:
+            return gr.update(visible=False), 'Select a program first.'
+        return gr.update(visible=True), f'**Program {pid}** and all its measurements will be permanently deleted.'
+
+    def ui_programs_delete_confirmed(self, program_id: Any) -> Tuple[Any, ...]:
+        if not self._db_available():
+            return [], self._database_unavailable_message(), gr.update(), gr.update(visible=False), ''
+        pid = int(float(program_id or 0))
+        if pid <= 0:
+            return self._programs_table(), 'Select a program first.', gr.update(), gr.update(visible=False), ''
+        if self._experiment.program_id == pid:
+            return (
+                self._programs_table(),
+                'Stop the running program before deleting it.',
+                self._programs_dropdown(self._programs_table()),
+                gr.update(visible=False),
+                '',
+            )
+        try:
+            self._db_query({'cmd': 'measurement_delete_by_program_id', 'program_id': pid})
+            response = self._db_query({'cmd': 'program_delete_by_id', 'id': pid})
+            if response.get('result') != 'Ok':
+                msg = f'Delete failed: {response.get("error", "unknown")}'
+            else:
+                msg = f'Program {pid} and its data were deleted.'
+                self._log(msg)
+            rows = self._programs_table()
+            return rows, msg, self._programs_dropdown(rows), gr.update(visible=False), ''
+        except Exception as exc:
+            return [], f'ERROR: {exc}', gr.update(), gr.update(visible=False), ''
+
+    def ui_programs_export(self, program_id: Any) -> Tuple[Optional[str], str]:
+        if not self._db_available():
+            return None, self._database_unavailable_message()
+        pid = int(float(program_id or 0))
+        if pid <= 0:
+            return None, 'Select a program to export.'
+        try:
+            result = export_program_archive(self._db_query, pid, self.export_dir, limit=50000)
+            if not result.get('ok'):
+                return None, result.get('error', 'export failed')
+            self._log(f'Exported program {pid} -> {result["zip_path"]}')
+            return result['zip_path'], (
+                f'Export ready: {result["measurement_count"]} measurements, '
+                f'{result["step_count"]} steps.'
+            )
+        except Exception as exc:
+            return None, f'ERROR: {exc}'
+
+    @staticmethod
+    def _parse_steps_dataframe(table: Any) -> List[Dict[str, float]]:
+        rows: List[Dict[str, float]] = []
+        if table is None:
+            return rows
+        for item in list(table):
+            if len(item) < 4:
+                continue
+            rows.append({
+                't_start': float(item[1]),
+                't_stop': float(item[2]),
+                'minutes': float(item[3]),
+            })
+        return rows
+
+    def ui_program_draft_add_step(
+        self,
+        table: Any,
+        t_start: float,
+        t_stop: float,
+        minutes: float,
+    ) -> Tuple[List[List[Any]], str]:
+        rows = [list(r) for r in (table or [])]
+        next_id = len(rows) + 1
+        rows.append([next_id, float(t_start), float(t_stop), float(minutes)])
+        return rows, f'Step {next_id} added to the list (not saved until you create the program).'
+
+    def ui_program_create_save(
+        self,
+        description: str,
+        steps_table: Any,
+        mode: float,
+        enabled_freqs: List[str],
+        range_max: float,
+    ) -> str:
+        if not self._db_available():
+            return self._database_unavailable_message()
+        try:
+            created = self._db_query({'cmd': 'new_program'})
+            if created.get('result') != 'Ok':
+                return f'ERROR: {created.get("error", "could not create program")}'
+            program_id = int(created.get('ID', 0))
+            self._db_query({
+                'cmd': 'set_program_meta',
+                'program_id': program_id,
+                'key': 'description',
+                'value': str(description or '').strip(),
+            })
+            freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
+            config = E720SweepConfig(
+                mode=int(mode),
+                enabled_frequencies=freqs,
+                range_max_hz=float(range_max),
+            )
+            self._db_query({'cmd': 'set_e720', **config.to_db_payload(program_id)})
+            for step in self._parse_steps_dataframe(steps_table):
+                self._db_query({
+                    'cmd': 'program_step_insert',
+                    'program_id': program_id,
+                    **step,
+                })
+            self.ui_programs_set_nav(program_id, 'edit')
+            self._log(f'Created program {program_id}')
+            return (
+                f'Program {program_id} created. '
+                f'Open [Edit program](/program-edit) to run it or change settings.'
+            )
+        except Exception as exc:
+            return f'ERROR: {exc}'
+
+    def _active_program_id(self) -> int:
+        with self._lock:
+            return int(self._programs_nav_program_id)
+
+    def ui_program_edit_load(self) -> Tuple[Any, ...]:
+        if not self._db_available():
+            empty = 'Database unavailable.'
+            return (empty, '', '', [], gr.update(), [], 10000, empty)
+        program_id = self._active_program_id()
+        if program_id <= 0:
+            return (
+                'No program selected. Go back to [Programs](/programs) and choose **Edit**.',
+                '',
+                '',
+                [],
+                gr.update(value=0),
+                [],
+                10000,
+                'Select a program on the list page first.',
+            )
+        try:
+            detail = self._db_query({'cmd': 'get_program_detail', 'id': program_id})
+            if detail.get('result') != 'Ok':
+                return (
+                    f'Program {program_id}',
+                    '',
+                    '',
+                    [],
+                    gr.update(value=0),
+                    [],
+                    10000,
+                    detail.get('error', 'not found'),
+                )
+            row = detail['row']
+            e720 = row.get('e720') or {}
+            cfg_raw = e720.get('config') if isinstance(e720.get('config'), dict) else {}
+            enabled = [str(int(x)) for x in cfg_raw.get('enabled_frequencies', [1000])]
+            steps = [
+                [s['step_id'], s['t_start'], s['t_stop'], s['minutes']]
+                for s in row.get('steps', [])
+            ]
+            self._load_e720_config_for_program(program_id)
+            header = f"## Program **{row['id']}** — {row['datetime']} — status: **{row['status']}**"
+            return (
+                header,
+                str(row.get('description') or ''),
+                str(row.get('status') or ''),
+                steps,
+                gr.update(value=int(e720.get('param', 0) or 0)),
+                enabled,
+                float(cfg_raw.get('range_max_hz', 10000) or 10000),
+                self._experiment_banner(),
+            )
+        except Exception as exc:
+            return (f'Program {program_id}', '', '', [], gr.update(value=0), [], 10000, f'ERROR: {exc}')
+
+    def ui_program_edit_save(
+        self,
+        description: str,
+        mode: float,
+        enabled_freqs: List[str],
+        range_max: float,
+    ) -> str:
+        if not self._db_available():
+            return self._database_unavailable_message()
+        program_id = self._active_program_id()
+        if program_id <= 0:
+            return 'No program loaded.'
+        try:
+            self._db_query({
+                'cmd': 'set_program_meta',
+                'program_id': program_id,
+                'key': 'description',
+                'value': str(description or '').strip(),
+            })
+            freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
+            config = E720SweepConfig(mode=int(mode), enabled_frequencies=freqs, range_max_hz=float(range_max))
+            response = self._db_query({'cmd': 'set_e720', **config.to_db_payload(program_id)})
+            if response.get('result') != 'Ok':
+                return f'ERROR: {response.get("error", "save failed")}'
+            self._load_e720_config_for_program(program_id)
+            return f'Program {program_id} saved.'
+        except Exception as exc:
+            return f'ERROR: {exc}'
+
+    def ui_program_edit_add_step(self, t_start: float, t_stop: float, minutes: float) -> Tuple[Any, str]:
+        program_id = self._active_program_id()
+        if program_id <= 0:
+            return [], 'No program loaded.'
+        try:
+            response = self._db_query({
+                'cmd': 'program_step_insert',
+                'program_id': program_id,
+                't_start': float(t_start),
+                't_stop': float(t_stop),
+                'minutes': float(minutes),
+            })
+            if response.get('result') != 'Ok':
+                return self._steps_table(program_id), f'ERROR: {response.get("error", "unknown")}'
+            return self._steps_table(program_id), 'Step added.'
+        except Exception as exc:
+            return [], f'ERROR: {exc}'
+
+    def ui_program_edit_delete_step(self, step_id: float) -> Tuple[Any, str]:
+        program_id = self._active_program_id()
+        if program_id <= 0:
+            return [], 'No program loaded.'
+        try:
+            response = self._db_query({'cmd': 'program_delete_temp', 'id': int(step_id)})
+            if response.get('result') != 'Ok':
+                return self._steps_table(program_id), f'ERROR: {response.get("error", "unknown")}'
+            return self._steps_table(program_id), f'Removed step {int(step_id)}.'
+        except Exception as exc:
+            return [], f'ERROR: {exc}'
+
+    def ui_start_program_from_edit(self) -> Tuple[str, str]:
+        program_id = self._active_program_id()
+        msg, banner = self.ui_start_program(float(program_id))
+        return banner, msg
+
+    def ui_stop_program_from_edit(self) -> Tuple[str, str]:
+        msg, banner = self.ui_stop_program()
+        return banner, msg
+
+    def ui_program_view_load(self) -> Tuple[Any, ...]:
+        if not self._db_available():
+            return 'Database unavailable.', [], '{}', '{}', self._database_unavailable_message()
+        program_id = self._active_program_id()
+        if program_id <= 0:
+            return (
+                'No program selected. Open [Programs](/programs) and press **Show details**.',
+                [],
+                '{}',
+                '{}',
+                'Select a program first.',
+            )
+        try:
+            detail = self._db_query({'cmd': 'get_program_detail', 'id': program_id})
+            if detail.get('result') != 'Ok':
+                return (f'Program {program_id}', [], '{}', '{}', detail.get('error', 'not found'))
+            row = detail['row']
+            steps = [[s['step_id'], s['t_start'], s['t_stop'], s['minutes']] for s in row.get('steps', [])]
+            desc = (row.get('description') or '').strip() or '_No description_'
+            summary = (
+                f"## Program {row['id']}\n\n"
+                f"- **Created:** {row['datetime']}\n"
+                f"- **Status:** {row['status']}\n"
+                f"- **Description:** {desc}\n"
+                f"- **Temperature steps:** {len(steps)}\n"
+            )
+            stats = row.get('measurement_stats') or {}
+            return (
+                summary,
+                steps,
+                json.dumps(row.get('e720') or {}, indent=2, default=str),
+                json.dumps(stats, indent=2, default=str),
+                f'Loaded program {program_id}.',
+            )
+        except Exception as exc:
+            return (f'Program {program_id}', [], '{}', '{}', f'ERROR: {exc}')
 
     def build_ui(self) -> gr.Blocks:
         return build_ui(self)

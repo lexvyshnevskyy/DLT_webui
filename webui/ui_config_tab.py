@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, List
 
 import gradio as gr
 
+from webui.collectors import network_config
+
 if TYPE_CHECKING:
     from webui.node import WebHMINode
 
@@ -27,40 +29,56 @@ def build_configuration_tab(node: 'WebHMINode') -> List[gr.components.Component]
     cfg_status = gr.Textbox(label='Configuration status', interactive=False)
 
     with gr.Accordion('Network', open=False):
-        gr.Markdown('NetworkManager (`nmcli`) — requires sudoers for IP/Wi‑Fi changes.')
+        gr.Markdown(
+            'Configure **eth0** (Ethernet) or **wlan0** (Wi‑Fi). Uses NetworkManager (`nmcli`) + dnsmasq for hotspot. '
+            'Requires `install_sudoers.sh` on the Pi.'
+        )
         net_iface_table = gr.Dataframe(
-            headers=['interface', 'state', 'mac', 'ipv4', 'ipv6', 'speed_mbps'],
+            headers=['interface', 'state', 'mac', 'ipv4'],
             interactive=False,
             label='Interfaces',
         )
-        net_refresh_btn = gr.Button('Refresh interfaces')
         with gr.Row():
-            nm_connection_box = gr.Dropdown(choices=[], label='Connection profile')
-            refresh_nm_btn = gr.Button('Refresh profiles')
-        gr.Markdown('#### Static IPv4')
+            net_refresh_btn = gr.Button('Refresh')
+            net_iface_select = gr.Dropdown(choices=['eth0', 'wlan0'], value='eth0', label='Configure interface')
+        net_iface_info = gr.Textbox(label='Selected interface', interactive=False)
+
+        gr.Markdown('#### Link & IPv4')
         with gr.Row():
-            static_ip_box = gr.Textbox(label='Address', placeholder='192.168.1.50')
-            static_prefix_box = gr.Number(label='Prefix', value=24, precision=0)
-            static_gw_box = gr.Textbox(label='Gateway', placeholder='192.168.1.1')
-            static_dns_box = gr.Textbox(label='DNS', placeholder='192.168.1.1')
+            net_up_btn = gr.Button('Bring up')
+            net_down_btn = gr.Button('Bring down')
+            net_dhcp_btn = gr.Button('Use DHCP')
         with gr.Row():
-            apply_static_btn = gr.Button('Apply static IPv4')
-            apply_dhcp_btn = gr.Button('Use DHCP')
-        static_msg = gr.Textbox(label='IPv4 result', interactive=False)
-        gr.Markdown('#### Wi‑Fi')
+            net_ip_box = gr.Textbox(label='IPv4 address', placeholder='192.168.144.170')
+            net_prefix_box = gr.Number(label='Prefix', value=24, precision=0)
         with gr.Row():
-            wifi_ssid_box = gr.Textbox(label='SSID')
-            wifi_password_box = gr.Textbox(label='Password', type='password')
-            wifi_iface_box = gr.Dropdown(choices=['wlan0', 'wlan1'], value='wlan0', label='Wi‑Fi interface')
-        with gr.Row():
-            wifi_scan_btn = gr.Button('Scan')
-            wifi_connect_btn = gr.Button('Connect', variant='primary')
-        wifi_table = gr.Dataframe(
-            headers=['in_use', 'ssid', 'signal', 'security'],
-            interactive=False,
-            label='Networks',
-        )
-        wifi_msg = gr.Textbox(label='Wi‑Fi result', interactive=False)
+            net_gw_box = gr.Textbox(label='Gateway (optional)', placeholder='192.168.144.1')
+            net_dns_box = gr.Textbox(label='DNS (optional)', placeholder='8.8.8.8')
+        net_apply_static_btn = gr.Button('Apply static IPv4', variant='primary')
+        net_msg = gr.Textbox(label='Network result', interactive=False)
+
+        with gr.Column(visible=False) as wlan_panel:
+            gr.Markdown('#### Wi‑Fi client (wlan)')
+            with gr.Row():
+                wifi_ssid_box = gr.Textbox(label='SSID to join')
+                wifi_password_box = gr.Textbox(label='Password', type='password')
+            with gr.Row():
+                wifi_scan_btn = gr.Button('Scan networks')
+                wifi_connect_btn = gr.Button('Connect', variant='primary')
+            wifi_table = gr.Dataframe(
+                headers=['in_use', 'ssid', 'signal', 'security'],
+                interactive=False,
+                label='Available networks',
+            )
+            gr.Markdown(
+                f'#### Personal hotspot (fixed: `{network_config.HOTSPOT_SSID}`, '
+                f'{network_config.HOTSPOT_IP_CIDR}, clients {network_config.HOTSPOT_DHCP_START}–'
+                f'{network_config.HOTSPOT_DHCP_END}, open)'
+            )
+            with gr.Row():
+                hotspot_enable_btn = gr.Button('Enable hotspot')
+                hotspot_disable_btn = gr.Button('Disable hotspot')
+            hotspot_status = gr.Textbox(label='Hotspot status', interactive=False)
 
     with gr.Accordion('LTM2985 UART', open=True):
         ltm_topic_out = _topic_test_row(node, 'LTM2985', 'ui_peek_ltm_topic')
@@ -127,7 +145,12 @@ def build_configuration_tab(node: 'WebHMINode') -> List[gr.components.Component]
     load_outputs = [
         cfg_status,
         net_iface_table,
-        nm_connection_box,
+        net_iface_select,
+        net_iface_info,
+        net_ip_box,
+        net_prefix_box,
+        wlan_panel,
+        hotspot_status,
         ltm_port,
         ltm_baud,
         meas_port,
@@ -148,19 +171,34 @@ def build_configuration_tab(node: 'WebHMINode') -> List[gr.components.Component]
     ]
 
     cfg_refresh_btn.click(node.ui_load_configuration, outputs=load_outputs)
-    net_refresh_btn.click(node.ui_tick_network, outputs=[net_iface_table])
-    refresh_nm_btn.click(node.ui_refresh_nm_connections, outputs=[nm_connection_box])
-    apply_static_btn.click(
-        node.ui_apply_static_ip,
-        inputs=[nm_connection_box, static_ip_box, static_prefix_box, static_gw_box, static_dns_box],
-        outputs=[static_msg],
+    net_refresh_btn.click(node.ui_refresh_network, outputs=[net_iface_table, net_iface_info, hotspot_status])
+    net_iface_select.change(
+        node.ui_select_network_interface,
+        inputs=[net_iface_select],
+        outputs=[net_iface_info, net_ip_box, net_prefix_box, wlan_panel, hotspot_status],
     )
-    apply_dhcp_btn.click(node.ui_apply_dhcp, inputs=[nm_connection_box], outputs=[static_msg])
-    wifi_scan_btn.click(node.ui_wifi_scan, outputs=[wifi_table, wifi_msg])
+    net_up_btn.click(node.ui_net_up, inputs=[net_iface_select], outputs=[net_msg, net_iface_table, net_iface_info])
+    net_down_btn.click(node.ui_net_down, inputs=[net_iface_select], outputs=[net_msg, net_iface_table, net_iface_info])
+    net_dhcp_btn.click(node.ui_net_dhcp, inputs=[net_iface_select], outputs=[net_msg, net_iface_table, net_iface_info])
+    net_apply_static_btn.click(
+        node.ui_net_apply_static,
+        inputs=[net_iface_select, net_ip_box, net_prefix_box, net_gw_box, net_dns_box],
+        outputs=[net_msg, net_iface_table, net_iface_info],
+    )
+    wifi_scan_btn.click(node.ui_wifi_scan, inputs=[net_iface_select], outputs=[wifi_table, net_msg])
     wifi_connect_btn.click(
         node.ui_wifi_connect,
-        inputs=[wifi_ssid_box, wifi_password_box, wifi_iface_box],
-        outputs=[wifi_msg],
+        inputs=[wifi_ssid_box, wifi_password_box, net_iface_select],
+        outputs=[net_msg],
+    )
+    hotspot_enable_btn.click(
+        node.ui_hotspot_enable,
+        inputs=[net_iface_select],
+        outputs=[net_msg, hotspot_status, net_iface_table],
+    )
+    hotspot_disable_btn.click(
+        node.ui_hotspot_disable,
+        outputs=[net_msg, hotspot_status, net_iface_table],
     )
     ltm_save.click(
         node.ui_save_ltm2985_config,

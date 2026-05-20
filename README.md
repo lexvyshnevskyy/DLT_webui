@@ -6,7 +6,9 @@ Gradio web interface for the Delatometry ROS 2 stack (replacement for legacy Del
 
 | Page | Purpose |
 |------|---------|
-| **Dashboard** (`/`) | General status + Programs (CRUD, run/stop, export) |
+| **Dashboard** (`/`) | General status, services, disks, UART overview |
+| **Programs** (`/programs`) | Program list, create, edit, view, export, delete |
+| **New program** (`/program-new`) | Description, temperature steps, E7-20 profile |
 | **Experiment** (`/experiment`) | Live LTM2985 temperature + E7-20 streams, manual heater |
 | **Configuration** (`/configuration`) | Network, nodes, DB test, core PWM pins, ADS1256 enable |
 

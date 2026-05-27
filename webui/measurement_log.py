@@ -14,14 +14,23 @@ def build_measurement_row(
     target_k: Optional[float],
     *,
     run_id: Optional[int] = None,
+    e720_offline: bool = False,
 ) -> Dict[str, Any]:
     control = temperatures.get(control_channel, {})
     monitor = temperatures.get(monitor_channel, {})
+    if e720_offline:
+        freq = 0.0
+        measure_ch1 = 0.0
+        measure_ch2 = 0.0
+    else:
+        freq = float(e720.get('frequency', 0.0) or 0.0)
+        measure_ch1 = float(e720.get('firstvalue', 0.0) or 0.0)
+        measure_ch2 = float(e720.get('secondvalue', 0.0) or 0.0)
     row: Dict[str, Any] = {
         'program_id': program_id,
-        'freq': float(e720.get('frequency', 0.0) or 0.0),
-        'measure_ch1': float(e720.get('firstvalue', 0.0) or 0.0),
-        'measure_ch2': float(e720.get('secondvalue', 0.0) or 0.0),
+        'freq': freq,
+        'measure_ch1': measure_ch1,
+        'measure_ch2': measure_ch2,
         't_ch1': float(control.get('value', 0.0) or 0.0),
         't_ch2': float(monitor.get('value', 0.0) or 0.0),
         't_exp': float(target_k if target_k is not None else 0.0),

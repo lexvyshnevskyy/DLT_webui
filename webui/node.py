@@ -77,7 +77,7 @@ class WebHMINode(Node):
         self.declare_parameter('enable_service_control', True)
         self.declare_parameter('network_use_sudo', True)
         self.declare_parameter('enable_measurement_logging', True)
-        self.declare_parameter('measurement_log_period_sec', 0.333)
+        self.declare_parameter('measurement_log_min_interval_sec', 0.25)
         self.declare_parameter('measurement_log_control_channel', 9)
         self.declare_parameter('measurement_log_monitor_channel', 3)
         self.declare_parameter('ltm_raw_topic', '/ltm2985/raw_json')
@@ -105,9 +105,9 @@ class WebHMINode(Node):
         self.enable_service_control = bool(self.get_parameter('enable_service_control').value)
         self.network_use_sudo = bool(self.get_parameter('network_use_sudo').value)
         self.enable_measurement_logging = bool(self.get_parameter('enable_measurement_logging').value)
-        self.measurement_log_period_sec = max(
-            0.1,
-            float(self.get_parameter('measurement_log_period_sec').value),
+        self.measurement_log_min_interval_sec = max(
+            0.2,
+            min(0.5, float(self.get_parameter('measurement_log_min_interval_sec').value)),
         )
         self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
         self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
@@ -164,7 +164,7 @@ class WebHMINode(Node):
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
         if self.enable_measurement_logging:
             self._measurement_log_timer = self.create_timer(
-                self.measurement_log_period_sec,
+                self.measurement_log_min_interval_sec,
                 self._measurement_log_tick,
             )
         self._log('webui node started')
@@ -214,6 +214,18 @@ class WebHMINode(Node):
         with self._lock:
             self._latest_e720 = msg
             self._e720_stream.appendleft(line)
+        if not data.get('online'):
+            return
+        with self._lock:
+            if self._experiment.program_id is None or self._experiment.run_id is None:
+                return
+            target_k = self._experiment.last_target_k
+        self._maybe_log_measurement(target_k, rate_limit=False, e720_offline=False)
+
+    def _e720_is_online(self) -> bool:
+        with self._lock:
+            msg = self._latest_e720
+        return bool(e720_from_msg(msg).get('online'))
 
     def _on_ltm_raw(self, msg: String) -> None:
         with self._lock:
@@ -319,13 +331,22 @@ class WebHMINode(Node):
         self._e720_cmd_pub.publish(msg)
 
     def _measurement_log_tick(self) -> None:
+        """When E7-20 is offline: log LTM temperatures on a timer; freq/measures are zero."""
+        if self._e720_is_online():
+            return
         with self._lock:
             if self._experiment.program_id is None or self._experiment.run_id is None:
                 return
             target_k = self._experiment.last_target_k
-        self._maybe_log_measurement(target_k, rate_limit=False)
+        self._maybe_log_measurement(target_k, rate_limit=True, e720_offline=True)
 
-    def _maybe_log_measurement(self, target_k: Optional[float], *, rate_limit: bool = True) -> None:
+    def _maybe_log_measurement(
+        self,
+        target_k: Optional[float],
+        *,
+        rate_limit: bool = True,
+        e720_offline: bool = False,
+    ) -> None:
         if not self.enable_measurement_logging or not self._db_available():
             return
         with self._lock:
@@ -335,11 +356,18 @@ class WebHMINode(Node):
             temps = dict(self._latest_measurements)
         if program_id is None or run_id is None:
             return
+        control = temps.get(self.log_control_channel, {})
+        if not control.get('valid'):
+            return
+        age_s = time.monotonic() - float(control.get('updated_monotonic', 0.0) or 0.0)
+        if age_s > 2.0:
+            return
         e720 = e720_from_msg(e720_msg)
-        if not e720.get('online'):
+        if not e720_offline and not e720.get('online'):
             return
         now = time.monotonic()
-        if rate_limit and now - self._last_measurement_log_monotonic < self.measurement_log_period_sec * 0.9:
+        min_interval = self.measurement_log_min_interval_sec
+        if rate_limit and now - self._last_measurement_log_monotonic < min_interval * 0.95:
             return
         row = build_measurement_row(
             program_id,
@@ -349,6 +377,7 @@ class WebHMINode(Node):
             self.log_monitor_channel,
             target_k,
             run_id=int(run_id),
+            e720_offline=e720_offline,
         )
         try:
             if insert_measurement(self._db_query, row):

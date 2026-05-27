@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from typing import List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from webui.e720_sweep import STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
-from webui.program_steps import DEFAULT_NEW_STEP, parse_step_field_updates
+from webui.program_steps import parse_step_field_updates
+from webui.temperature_validation import T_MAX_K, T_MIN_K, validate_new_program, validate_temperature_steps
 
 router = APIRouter()
 
@@ -38,6 +40,7 @@ async def program_new_form(request: Request, msg: str = Query(''), new: int = Qu
     templates, node = _tpl(request)
     if new:
         node.clear_new_program_draft()
+    default_step = node.suggest_new_program_step_defaults()
     return templates.TemplateResponse(
         request,
         'programs/new.html',
@@ -47,9 +50,27 @@ async def program_new_form(request: Request, msg: str = Query(''), new: int = Qu
             'steps': node.get_new_program_draft(),
             'message': msg,
             'e720': _e720_choices(),
-            'default_step': DEFAULT_NEW_STEP,
+            'default_step': default_step,
+            't_limits': {'t_min_k': T_MIN_K, 't_max_k': T_MAX_K},
         },
     )
+
+
+@router.post('/program-new/validate')
+async def program_new_validate(request: Request) -> JSONResponse:
+    _, node = _tpl(request)
+    form = await request.form()
+    node.update_new_program_draft_from_form(parse_step_field_updates(form))
+    draft = node.get_new_program_draft()
+    enabled = form.getlist('enabled_freqs') if hasattr(form, 'getlist') else []
+    result = validate_new_program(
+        str(form.get('description', '') or ''),
+        draft,
+        int(form.get('sweep_mode', 0) or 0),
+        enabled,
+        float(form.get('range_max', 10000) or 10000),
+    )
+    return JSONResponse(result.to_dict())
 
 
 @router.post('/program-new/steps/add')
@@ -60,7 +81,9 @@ async def program_new_add_step(
     minutes: float = Form(...),
 ) -> RedirectResponse:
     _, node = _tpl(request)
-    node.add_new_program_draft_step(t_start, t_stop, minutes)
+    err = node.add_new_program_draft_step(t_start, t_stop, minutes)
+    if err:
+        return RedirectResponse(url=f'/program-new?msg={quote(err)}', status_code=303)
     return RedirectResponse(url='/program-new?msg=Step+added', status_code=303)
 
 
@@ -83,9 +106,9 @@ async def program_new_create(
     form = await request.form()
     node.update_new_program_draft_from_form(parse_step_field_updates(form))
     msg = node.ui_program_create_from_draft(description, sweep_mode, enabled_freqs, range_max)
-    if msg.startswith('ERROR') or msg.startswith('Add at least'):
-        return RedirectResponse(url=f'/program-new?msg={msg}', status_code=303)
-    return RedirectResponse(url=f'/programs?msg={msg}', status_code=303)
+    if not msg.startswith('Program '):
+        return RedirectResponse(url=f'/program-new?msg={quote(msg)}', status_code=303)
+    return RedirectResponse(url=f'/programs?msg={quote(msg)}', status_code=303)
 
 
 @router.get('/program-view', response_class=HTMLResponse)
@@ -159,6 +182,11 @@ async def program_new_save_one_step(
 ) -> JSONResponse:
     _, node = _tpl(request)
     node.update_new_program_draft_step(int(step_id), float(t_start), float(t_stop), float(minutes))
+    draft = node.get_new_program_draft()
+    steps_ok, issues = validate_temperature_steps(draft)
+    if not steps_ok:
+        msg = issues[0].message if issues else 'Invalid step.'
+        return JSONResponse({'ok': False, 'message': msg, 'step_id': step_id})
     return JSONResponse({'ok': True, 'message': f'Step {step_id} updated.', 'step_id': step_id})
 
 

@@ -24,7 +24,7 @@ def parse_step_field_updates(form: Mapping[str, Any]) -> Dict[int, Dict[str, flo
 STEP_TABLE_HEADERS = ['step_id', 't_start_k', 't_stop_k', 'minutes', '🗑']
 STEP_TABLE_DATATYPES = ['number', 'number', 'number', 'number', 'str']
 STEP_STATIC_COLUMNS = [0, 4]  # step_id and delete column are not editable
-DEFAULT_NEW_STEP = (200.0, 300.0, 15.0)
+DEFAULT_NEW_STEP = (40.0, 100.0, 15.0)
 DELETE_MARKERS = frozenset({'delete', 'del', 'x', 'remove', 'yes'})
 HEADER_MARKERS = frozenset({'step_id', 'id', 't_start_k', 't_stop_k', 'minutes'})
 

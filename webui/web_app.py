@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import base64
 import secrets
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from webui.web_paths import static_dir, templates_dir
 from webui.routes import config, dashboard, experiment, programs
@@ -17,33 +19,65 @@ if TYPE_CHECKING:
     from webui.node import WebHMINode
 
 
-class BasicAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, username: str, password: str) -> None:
-        super().__init__(app)
+def _path_exempt_from_auth(path: str) -> bool:
+    path = path or ''
+    if path.startswith('/static/'):
+        return True
+    if path.startswith('/ws/'):
+        return True
+    if path.startswith('/api/'):
+        return True
+    if path == '/dashboard/snapshot':
+        return True
+    return False
+
+
+class BasicAuthMiddleware:
+    """ASGI middleware — must not block WebSocket handshakes (HTTP Upgrade to /ws/*)."""
+
+    def __init__(self, app: ASGIApp, username: str, password: str) -> None:
+        self.app = app
         self._username = username
         self._password = password
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if request.url.path.startswith('/static/'):
-            return await call_next(request)
-        if request.url.path == '/ws/experiment':
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope['type'] == 'websocket':
+            await self.app(scope, receive, send)
+            return
+
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get('path', '')
+        if _path_exempt_from_auth(path):
+            await self.app(scope, receive, send)
+            return
+
+        # WebSocket upgrade is an HTTP request first; do not require auth on /ws/*
+        headers = {k.decode('latin-1').lower(): v.decode('latin-1') for k, v in scope.get('headers', [])}
+        if headers.get('upgrade', '').lower() == 'websocket' and path.startswith('/ws'):
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
         auth = request.headers.get('Authorization', '')
         if auth.startswith('Basic '):
-            import base64
-
             try:
                 decoded = base64.b64decode(auth[6:]).decode('utf-8')
                 user, _, pwd = decoded.partition(':')
                 if secrets.compare_digest(user, self._username) and secrets.compare_digest(pwd, self._password):
-                    return await call_next(request)
+                    await self.app(scope, receive, send)
+                    return
             except Exception:
                 pass
-        return Response(
+
+        response = Response(
             status_code=401,
             headers={'WWW-Authenticate': 'Basic realm="Delatometry"'},
             content='Authentication required',
         )
+        await response(scope, receive, send)
 
 
 def create_app(node: 'WebHMINode') -> FastAPI:
@@ -64,8 +98,32 @@ def create_app(node: 'WebHMINode') -> FastAPI:
     app.include_router(experiment.router)
     app.include_router(config.router)
 
+    # Live dashboard endpoints on the app factory (not only the router) so a stale
+    # install/webui/.../routes/dashboard.py cannot drop them after partial sync.
+    app.add_api_route(
+        '/dashboard/snapshot',
+        dashboard.dashboard_snapshot,
+        methods=['GET'],
+        name='dashboard_snapshot',
+    )
+    app.add_api_route(
+        '/api/dashboard/snapshot',
+        dashboard.dashboard_snapshot,
+        methods=['GET'],
+        name='dashboard_snapshot_api',
+    )
+    app.add_api_websocket_route('/ws/dashboard', dashboard.dashboard_ws, name='dashboard_ws')
+
     @app.get('/')
     async def root() -> RedirectResponse:
         return RedirectResponse(url='/dashboard', status_code=302)
+
+    @app.on_event('startup')
+    async def _log_routes() -> None:
+        paths = sorted({getattr(r, 'path', None) for r in app.routes if getattr(r, 'path', None)})
+        live = [p for p in paths if 'snapshot' in p or p.startswith('/ws/')]
+        node._log(
+            f'Web UI auth_enabled={node.auth_enabled}; live routes: {", ".join(live) or "(none)"}'
+        )
 
     return app

@@ -64,6 +64,9 @@
                 parts.tStop.dataset.original = parts.tStop.value;
                 parts.minutes.dataset.original = parts.minutes.value;
                 setStatus(tr, 'saved', true);
+                if (!programId) {
+                  document.dispatchEvent(new CustomEvent('program-new-steps-changed'));
+                }
               } else {
                 setStatus(tr, data.message || 'failed', false);
               }

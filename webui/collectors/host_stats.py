@@ -25,18 +25,24 @@ def collect_host_stats() -> Dict[str, Any]:
     memory = psutil.virtual_memory()
     disk_rows: List[List[Any]] = []
     for part in psutil.disk_partitions(all=False):
+        if part.fstype in ('squashfs', 'tmpfs', 'devtmpfs', 'proc', 'sysfs', 'devpts', 'cgroup2'):
+            continue
         try:
             usage = psutil.disk_usage(part.mountpoint)
+            stat = os.statvfs(part.mountpoint)
         except (PermissionError, OSError):
             continue
+        inode_total = int(stat.f_files)
+        inode_free = int(stat.f_ffree)
+        inode_free_pct = round(100.0 * inode_free / inode_total, 1) if inode_total > 0 else 0.0
+        disk_label = part.mountpoint if part.mountpoint else part.device
+        if part.device and part.mountpoint and part.device != part.mountpoint:
+            disk_label = f'{part.device} ({part.mountpoint})'
         disk_rows.append([
-            part.device,
-            part.mountpoint,
-            part.fstype,
-            round(usage.total / (1024 ** 3), 2),
-            round(usage.used / (1024 ** 3), 2),
-            round(usage.free / (1024 ** 3), 2),
+            disk_label,
             round(usage.percent, 1),
+            inode_free_pct,
+            round(usage.free / (1024 ** 3), 2),
         ])
 
     return {

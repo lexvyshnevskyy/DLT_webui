@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 ENV_KEYS = {
     'LTM2985': 'DELATOMETRY_LTM2985_PORT',
     'E7-20 / measure_device': 'DELATOMETRY_MEASURE_PORT',
+    'HMI (Nextion)': 'DELATOMETRY_HMI_PORT',
 }
 
 
@@ -58,10 +59,8 @@ def uart_table(env_file: str) -> List[List[Any]]:
     return [
         [
             row['label'],
-            row['device'],
-            'yes' if row['exists'] else 'no',
-            'yes' if row.get('readable') else 'no',
-            'yes' if row.get('writable') else 'no',
+            row['device'] or '—',
+            'OK' if row.get('ok') else ('missing' if not row['exists'] else 'no access'),
         ]
         for row in collect_uart_status(env_file)
     ]

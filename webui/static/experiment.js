@@ -1,5 +1,6 @@
 (function () {
-  const wsPath = window.DELATOMETRY_WS || '/ws/experiment';
+  const root = document.getElementById('experiment-live');
+  const wsPath = (root && root.dataset.ws) || '/ws/experiment';
   const maxPoints = 120;
   const labels = [];
   const controlData = [];

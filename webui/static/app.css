@@ -130,6 +130,44 @@ input.wide { min-width: 280px; }
 .step-save-status.err { color: var(--err); }
 .muted { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.75rem; }
 
+.program-wizard-section .section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.section-badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--border);
+  color: var(--muted);
+}
+.section-badge.ok { background: #1a3d2e; color: var(--ok); }
+.section-badge.pending { background: #3d3420; color: #fcd34d; }
+.program-wizard-section.section-locked {
+  opacity: 0.72;
+}
+.field-block { margin-top: 0.5rem; }
+.req { color: var(--err); }
+.validation-summary {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+.validation-summary.has-errors {
+  background: #2a1a1a;
+  border-color: #5c2a2a;
+}
+.validation-summary ul { margin: 0; padding-left: 1.1rem; }
+.validation-summary li.error { color: #fecaca; }
+.steps-edit-table tr.step-invalid { background: rgba(248, 113, 113, 0.08); }
+.steps-edit-table input.input-invalid { border-color: var(--err); box-shadow: 0 0 0 1px var(--err); }
+.wizard-actions { margin: 1rem 0 2rem; }
+#create-program-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
 details.config-section { margin-bottom: 0.75rem; }
 details.config-section summary {
   cursor: pointer;

@@ -1,32 +1,34 @@
 {% extends "base.html" %}
 {% set active = 'dashboard' %}
 {% block content %}
+<div id="dashboard-live" data-ws="/ws/dashboard" data-poll="/dashboard/snapshot" hidden></div>
 <h1>Dashboard</h1>
+<p class="muted">Live refresh ~1 Hz (WebSocket). Service buttons still use normal form POST.</p>
 
-<section class="card">
+<section class="card" id="dash-system">
   <h2>System status</h2>
-  <ul class="kv">
-    <li><span>Core</span><strong class="{{ 'ok' if services.core_available else 'err' }}">{{ 'OK' if services.core_available else 'DOWN' }}</strong></li>
-    <li><span>Database</span><strong class="{{ 'ok' if services.database_available else 'err' }}">{{ 'OK' if services.database_available else 'DOWN' }}</strong></li>
-    <li><span>Ready</span><strong>{{ 'yes' if services.system_ready else 'no' }}</strong></li>
-    {% if services.pwm_note %}<li><span>PWM</span><em>{{ services.pwm_note }}</em></li>{% endif %}
+  <ul class="kv" id="dash-system-kv">
+    <li><span>Core</span><strong id="dash-core" class="{{ 'ok' if services.core_available else 'err' }}">{{ 'OK' if services.core_available else 'DOWN' }}</strong></li>
+    <li><span>Database</span><strong id="dash-db" class="{{ 'ok' if services.database_available else 'err' }}">{{ 'OK' if services.database_available else 'DOWN' }}</strong></li>
+    <li><span>Ready</span><strong id="dash-ready">{{ 'yes' if services.system_ready else 'no' }}</strong></li>
+    <li id="dash-pwm-row" {% if not services.pwm_note %}style="display:none"{% endif %}><span>PWM</span><em id="dash-pwm">{{ services.pwm_note or '' }}</em></li>
   </ul>
 </section>
 
-<section class="card">
+<section class="card" id="dash-host">
   <h2>Host</h2>
-  {% if host.error %}
-  <p class="err">{{ host.error }}</p>
-  {% else %}
-  <ul class="kv">
-    <li><span>CPU</span><strong>{{ host.cpu_percent }}%</strong></li>
-    <li><span>Load</span><strong>{{ host.load_avg }}</strong></li>
-    <li><span>Memory</span><strong>{{ host.memory_percent }}% ({{ host.memory_used_gb }}/{{ host.memory_total_gb }} GB)</strong></li>
+  <ul class="kv" id="dash-host-kv">
+    {% if host.error %}
+    <li><span>Error</span><strong class="err">{{ host.error }}</strong></li>
+    {% else %}
+    <li><span>CPU</span><strong id="dash-cpu">{{ host.cpu_percent }}%</strong></li>
+    <li><span>Load</span><strong id="dash-load">{{ host.load_avg }}</strong></li>
+    <li><span>Memory</span><strong id="dash-mem">{{ host.memory_percent }}% ({{ host.memory_used_gb }}/{{ host.memory_total_gb }} GB)</strong></li>
+    {% endif %}
   </ul>
-  {% endif %}
 </section>
 
-<section class="card">
+<section class="card" id="dash-services">
   <h2>Services</h2>
   {% if not enable_service_control %}
   <p class="muted">Service control is disabled (enable_service_control:=true).</p>
@@ -35,12 +37,12 @@
   {% endif %}
   <table class="data">
     <thead><tr><th>Unit</th><th>Active</th><th>Sub</th><th>Actions</th></tr></thead>
-    <tbody>
+    <tbody id="dash-services-tbody">
     {% for row in units %}
-      <tr>
+      <tr data-unit="{{ row[0] }}">
         <td><code>{{ row[0] }}</code></td>
-        <td>{{ row[1] }}</td>
-        <td>{{ row[2] }}</td>
+        <td class="svc-active">{{ row[1] }}</td>
+        <td class="svc-sub">{{ row[2] }}</td>
         <td class="actions service-actions">
           {% if enable_service_control %}
           <form method="post" action="/dashboard/service" class="inline">
@@ -66,35 +68,35 @@
   </table>
 </section>
 
-<section class="card">
+<section class="card" id="dash-disk">
   <h2>Disk</h2>
   <table class="data">
-    <thead><tr><th>Mount</th><th>Used %</th><th>Free GB</th></tr></thead>
-    <tbody>
+    <thead><tr><th>Disk</th><th>Utilization %</th><th>Inodes free %</th><th>Free GB</th></tr></thead>
+    <tbody id="dash-disk-tbody">
     {% for row in disks %}
-      <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td></tr>
+      <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </section>
 
-<section class="card">
+<section class="card" id="dash-uart">
   <h2>UART ports</h2>
   <table class="data">
-    <thead><tr><th>Device</th><th>Description</th></tr></thead>
-    <tbody>
+    <thead><tr><th>Role</th><th>Port</th><th>Status</th></tr></thead>
+    <tbody id="dash-uart-tbody">
     {% for row in uart %}
-      <tr><td><code>{{ row[0] }}</code></td><td>{{ row[1] }}</td></tr>
+      <tr><td>{{ row[0] }}</td><td><code>{{ row[1] }}</code></td><td>{{ row[2] }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </section>
 
-<section class="card">
+<section class="card" id="dash-network">
   <h2>Network interfaces</h2>
   <table class="data">
     <thead><tr><th>Interface</th><th>State</th><th>MAC</th><th>IPv4</th></tr></thead>
-    <tbody>
+    <tbody id="dash-network-tbody">
     {% for row in interfaces %}
       <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
     {% endfor %}
@@ -104,6 +106,9 @@
 
 <section class="card">
   <h2>Log</h2>
-  <pre class="log">{{ log_text }}</pre>
+  <pre class="log" id="dash-log">{{ log_text }}</pre>
 </section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/dashboard.js" defer></script>
 {% endblock %}

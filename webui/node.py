@@ -16,6 +16,8 @@ from rclpy.node import Node
 from std_msgs.msg import String, UInt8
 
 from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops
+from webui.param_utils import ros_param_bool
+from webui.temperature_validation import suggest_next_step, validate_new_program, validate_temperature_steps
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
 from webui.experiment_runner import ExperimentRunner, ExperimentState, ProgramStep
@@ -86,7 +88,7 @@ class WebHMINode(Node):
         self.bind_port = int(self.get_parameter('bind_port').value)
         self.title = str(self.get_parameter('title').value)
         self.queue_enabled = bool(self.get_parameter('queue_enabled').value)
-        self.auth_enabled = bool(self.get_parameter('auth_enabled').value)
+        self.auth_enabled = ros_param_bool(self.get_parameter('auth_enabled').value)
         self.auth_user = str(self.get_parameter('auth_user').value)
         self.auth_password = str(self.get_parameter('auth_password').value)
         self.status_refresh_period_sec = float(self.get_parameter('status_refresh_period_sec').value)
@@ -1054,26 +1056,36 @@ class WebHMINode(Node):
         return msg
 
     # --- Web UI context helpers ---
-    def get_dashboard_context(self) -> Dict[str, Any]:
-        (
-            _critical,
-            host_summary,
-            units,
-            disks,
-            uart,
-            interfaces,
-            log_text,
-        ) = self.ui_tick_general()
+    def get_dashboard_snapshot(self) -> Dict[str, Any]:
+        host = host_stats.collect_host_stats()
+        host_summary = (
+            {
+                'cpu_percent': host.get('cpu_percent'),
+                'load_avg': host.get('load_avg'),
+                'memory_percent': host.get('memory_percent'),
+                'memory_used_gb': host.get('memory_used_gb'),
+                'memory_total_gb': host.get('memory_total_gb'),
+            }
+            if host.get('available')
+            else {'error': host.get('error')}
+        )
         return {
-            'title': self.title,
             'services': self._critical_services_status(),
             'host': host_summary,
-            'units': units,
-            'disks': disks,
-            'uart': uart,
-            'interfaces': interfaces,
-            'log_text': log_text,
+            'units': systemd_ops.units_table(self.systemd_units),
+            'disks': host.get('disk_rows', []),
+            'uart': serial_ports.uart_table(self.delatometry_env_file),
+            'interfaces': network_info.interfaces_table(),
+            'log_text': '\n'.join(list(self._log_lines)),
+        }
+
+    def get_dashboard_context(self) -> Dict[str, Any]:
+        snap = self.get_dashboard_snapshot()
+        return {
+            'title': self.title,
+            'refresh_sec': self.status_refresh_period_sec,
             'enable_service_control': self.enable_service_control,
+            **snap,
         }
 
     def get_configuration_context(self, iface: Optional[str] = None) -> Dict[str, Any]:
@@ -1157,10 +1169,22 @@ class WebHMINode(Node):
         with self._lock:
             return [list(row) for row in self._new_program_draft]
 
-    def add_new_program_draft_step(self, t_start: float, t_stop: float, minutes: float) -> None:
+    def suggest_new_program_step_defaults(self) -> Tuple[float, float, float]:
         with self._lock:
-            next_id = len(self._new_program_draft) + 1
+            draft = [list(row) for row in self._new_program_draft]
+        return suggest_next_step(draft)
+
+    def add_new_program_draft_step(self, t_start: float, t_stop: float, minutes: float) -> str:
+        with self._lock:
+            draft = [list(row) for row in self._new_program_draft]
+        next_id = len(draft) + 1
+        candidate = draft + [[next_id, float(t_start), float(t_stop), float(minutes)]]
+        ok, issues = validate_temperature_steps(candidate)
+        if not ok:
+            return issues[0].message if issues else 'Invalid temperature step.'
+        with self._lock:
             self._new_program_draft.append([next_id, float(t_start), float(t_stop), float(minutes)])
+        return ''
 
     def remove_new_program_draft_step(self, step_id: int) -> None:
         with self._lock:
@@ -1179,6 +1203,9 @@ class WebHMINode(Node):
     ) -> str:
         with self._lock:
             draft = [list(row) for row in self._new_program_draft]
+        check = validate_new_program(description, draft, int(mode), enabled_freqs, float(range_max))
+        if not check.can_create:
+            return check.issues[0].message if check.issues else 'Cannot create program.'
         return self.ui_program_create_save_new_page(description, draft, float(mode), enabled_freqs, range_max)
 
     # --- Programs ---
@@ -1587,7 +1614,10 @@ class WebHMINode(Node):
         from webui.web_app import create_app
 
         app = create_app(self)
-        self._log(f'Web UI at http://{self.bind_host}:{self.bind_port}')
+        self._log(
+            f'Web UI at http://{self.bind_host}:{self.bind_port} '
+            f'(auth_enabled={self.auth_enabled}, live: /ws/dashboard, /api/dashboard/snapshot)'
+        )
         uvicorn.run(app, host=self.bind_host, port=self.bind_port, log_level='info')
 
 

@@ -15,7 +15,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String, UInt8
 
-from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops
+from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops, vpn_config
 from webui.param_utils import ros_param_bool
 from webui.program_steps import parse_step_field_updates
 from webui.temperature_validation import suggest_next_step, validate_new_program, validate_temperature_steps
@@ -667,6 +667,48 @@ class WebHMINode(Node):
         self._log(f'hotspot disable: {msg}')
         return msg, self._hotspot_status_text(), network_info.interfaces_table()
 
+    def ui_vpn_save(
+        self,
+        provider: str,
+        enabled: bool,
+        connect_on_boot: bool,
+        zerotier_network_id: str,
+        openvpn_username: str,
+        openvpn_password: str,
+        connect_now: bool,
+    ) -> str:
+        result = vpn_config.save_settings(
+            provider=provider,
+            enabled=enabled,
+            connect_on_boot=connect_on_boot,
+            zerotier_network_id=zerotier_network_id,
+            openvpn_username=openvpn_username,
+            openvpn_password=openvpn_password,
+            connect_now=connect_now,
+            use_sudo=self.network_use_sudo,
+        )
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'vpn save: {msg}')
+        return msg
+
+    def ui_vpn_upload_profile(self, content: bytes) -> str:
+        result = vpn_config.save_openvpn_profile(content, use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'vpn upload: {msg}')
+        return msg
+
+    def ui_vpn_connect(self) -> str:
+        result = vpn_config.connect_vpn(use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'vpn connect: {msg}')
+        return msg
+
+    def ui_vpn_disconnect(self) -> str:
+        result = vpn_config.disconnect_vpn(use_sudo=self.network_use_sudo)
+        msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        self._log(f'vpn disconnect: {msg}')
+        return msg
+
     def _save_env_section(
         self,
         updates: Dict[str, str],
@@ -1127,6 +1169,7 @@ class WebHMINode(Node):
             'pwm_pins': gpio_pins.bcm_pin_choices(core['pwm_pin_ch1']),
             'hotspot_ssid': network_config.HOTSPOT_SSID,
             'wifi_networks': wifi_rows,
+            'vpn': vpn_config.get_status(),
             'peek': peek,
             **net,
         }

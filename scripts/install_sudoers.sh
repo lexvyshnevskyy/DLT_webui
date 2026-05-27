@@ -50,7 +50,24 @@ ${RUN_USER} ALL=(root) NOPASSWD: \\
   ${SYSTEMCTL} enable delatometry-hotspot-dnsmasq.service, \\
   ${SYSTEMCTL} disable delatometry-hotspot-dnsmasq.service, \\
   ${SYSTEMCTL} start delatometry-hotspot-dnsmasq.service, \\
-  ${SYSTEMCTL} stop delatometry-hotspot-dnsmasq.service
+  ${SYSTEMCTL} stop delatometry-hotspot-dnsmasq.service, \\
+  ${SYSTEMCTL} enable delatometry-vpn.service, \\
+  ${SYSTEMCTL} disable delatometry-vpn.service, \\
+  ${SYSTEMCTL} start delatometry-vpn.service, \\
+  ${SYSTEMCTL} stop delatometry-vpn.service, \\
+  /usr/bin/tee /etc/delatometry/vpn.json, \\
+  /usr/bin/cp, \\
+  /usr/bin/chmod 600 /etc/delatometry/openvpn/client.ovpn, \\
+  /usr/bin/chmod 600 /etc/delatometry/openvpn/auth.txt, \\
+  /usr/bin/chmod 644 /etc/delatometry/vpn.json, \\
+  /usr/bin/mkdir -p /etc/delatometry/openvpn, \\
+  /usr/bin/rm -f /etc/delatometry/openvpn/auth.txt, \\
+  /usr/bin/openvpn, \\
+  /usr/bin/pkill, \\
+  /usr/bin/kill, \\
+  /usr/bin/zerotier-cli, \\
+  ${SYSTEMCTL} enable zerotier-one.service, \\
+  ${SYSTEMCTL} start zerotier-one.service
 EOF
 
 if [ -n "$SYSTEMCTL_EXTRA" ]; then

@@ -75,6 +75,10 @@ body {
 }
 .card h2 { margin-top: 0; font-size: 1.1rem; }
 
+.vpn-panel { margin: 0.75rem 0; }
+.vpn-form .form-row { flex-wrap: wrap; align-items: flex-end; }
+span.ok { color: var(--ok); }
+
 .flash {
   background: #2a3f5f;
   border: 1px solid var(--accent);

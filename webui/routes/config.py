@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import List
+from urllib.parse import quote
 
-from fastapi import APIRouter, Form, Query, Request
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from webui.render import template_response
@@ -15,9 +16,14 @@ def _tpl(request: Request):
 
 
 @router.get('/configuration', response_class=HTMLResponse)
-async def configuration_page(request: Request, iface: str = '') -> HTMLResponse:
+async def configuration_page(
+    request: Request,
+    iface: str = '',
+    vpn_msg: str = '',
+) -> HTMLResponse:
     templates, node = _tpl(request)
     ctx = node.get_configuration_context(iface or None)
+    ctx['vpn_msg'] = vpn_msg
     return template_response(templates, request, 'config.html', ctx)
 
 
@@ -97,6 +103,67 @@ async def hotspot_disable(request: Request) -> RedirectResponse:
     _, node = _tpl(request)
     node.ui_hotspot_disable()
     return RedirectResponse(url='/configuration?iface=wlan0', status_code=303)
+
+
+def _config_redirect(iface: str, vpn_msg: str = '') -> str:
+    url = f'/configuration?iface={quote(iface or "eth0")}'
+    if vpn_msg:
+        url += f'&vpn_msg={quote(vpn_msg)}'
+    return url
+
+
+@router.post('/configuration/network/vpn-save')
+async def vpn_save(
+    request: Request,
+    iface: str = Form('eth0'),
+    provider: str = Form('none'),
+    vpn_enabled: str = Form('false'),
+    connect_on_boot: str = Form('false'),
+    connect_now: str = Form('false'),
+    zerotier_network_id: str = Form(''),
+    openvpn_username: str = Form(''),
+    openvpn_password: str = Form(''),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    enabled = vpn_enabled.lower() in ('true', '1', 'on', 'yes')
+    boot = connect_on_boot.lower() in ('true', '1', 'on', 'yes')
+    now = connect_now.lower() in ('true', '1', 'on', 'yes')
+    msg = node.ui_vpn_save(
+        provider,
+        enabled,
+        boot,
+        zerotier_network_id,
+        openvpn_username,
+        openvpn_password,
+        now,
+    )
+    return RedirectResponse(url=_config_redirect(iface, msg), status_code=303)
+
+
+@router.post('/configuration/network/vpn-upload')
+async def vpn_upload(
+    request: Request,
+    iface: str = Form('eth0'),
+    ovpn_file: UploadFile = File(...),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    content = await ovpn_file.read()
+    msg = node.ui_vpn_upload_profile(content)
+    return RedirectResponse(url=_config_redirect(iface, msg), status_code=303)
+
+
+@router.post('/configuration/network/vpn-connect')
+async def vpn_connect(request: Request, iface: str = Form('eth0')) -> RedirectResponse:
+    _, node = _tpl(request)
+    msg = node.ui_vpn_connect()
+    return RedirectResponse(url=_config_redirect(iface, msg), status_code=303)
+
+
+@router.post('/configuration/network/vpn-disconnect')
+async def vpn_disconnect(request: Request, iface: str = Form('eth0')) -> RedirectResponse:
+    _, node = _tpl(request)
+    msg = node.ui_vpn_disconnect()
+    return RedirectResponse(url=_config_redirect(iface, msg), status_code=303)
 
 
 @router.post('/configuration/ltm')

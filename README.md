@@ -111,6 +111,10 @@ Aliases: `ua` → `uk`.
 | `/configuration/network/wifi-connect` | `iface`, `ssid`, `password` |
 | `/configuration/network/hotspot-enable` | Enable hotspot |
 | `/configuration/network/hotspot-disable` | Disable hotspot |
+| `/configuration/network/vpn-save` | `provider`, `vpn_enabled`, `connect_on_boot`, `connect_now`, ZeroTier ID, OpenVPN credentials |
+| `/configuration/network/vpn-upload` | Upload `.ovpn` client profile |
+| `/configuration/network/vpn-connect` | Connect VPN now |
+| `/configuration/network/vpn-disconnect` | Disconnect VPN |
 | `/configuration/ltm` | `port`, `baudrate`, `restart` → `/etc/default/delatometry` |
 | `/configuration/measure` | `port`, `speed`, `restart` |
 | `/configuration/database/test` | `host`, `port`, `name`, `user`, `password` |
@@ -215,6 +219,24 @@ When `auth_enabled:=false` (default), no login prompt.
 | `delatometry-webui.service` | This package (`run_node.sh webui`) |
 
 Dashboard **stop/restart** on `delatometry-webui.service` and DB units is disabled in UI (use SSH).
+
+### VPN (OpenVPN / ZeroTier)
+
+Configuration → **Network** → **VPN** saves `/etc/delatometry/vpn.json` and optional OpenVPN profile under `/etc/delatometry/openvpn/`.
+
+| Package | Purpose |
+|---------|---------|
+| `openvpn` | Client daemon for `.ovpn` profiles |
+| `zerotier-one` | ZeroTier mesh (`zerotier-cli`) |
+
+When **Connect on boot** is checked, `delatometry-vpn.service` is enabled (installed by `scripts/systemd/install_services.sh`). It runs after `network-online.target`.
+
+Re-run after pulling VPN changes:
+
+```bash
+sudo bash src/webui/scripts/install_sudoers.sh
+sudo bash scripts/systemd/install_services.sh   # installs delatometry-vpn.service
+```
 
 Install sudoers (once per machine):
 

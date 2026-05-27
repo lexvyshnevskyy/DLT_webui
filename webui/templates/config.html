@@ -47,8 +47,67 @@
       <label>Prefix <input type="number" name="prefix" value="{{ net_prefix }}"></label>
       <label>Gateway <input name="gateway" placeholder="optional"></label>
       <label>DNS <input name="dns" placeholder="optional"></label>
-      <button type="submit">Apply static IPv4</button>
+      <button type="submit">{{ _('config.static_ipv4') }}</button>
     </form>
+
+    <h3>{{ _('config.vpn_title') }}</h3>
+  {% if vpn_msg %}
+    <p class="flash">{{ vpn_msg }}</p>
+  {% endif %}
+    <p class="muted">{{ _('config.vpn_hint') }}</p>
+    <p><strong>{{ _('config.vpn_status') }}:</strong> {{ vpn.detail }}
+      {% if vpn.connected %}<span class="ok">({{ _('config.vpn_connected') }})</span>{% endif %}
+    </p>
+    <p class="muted">
+      OpenVPN: {% if vpn.openvpn_installed %}{{ _('common.ok') }}{% else %}{{ _('config.vpn_pkg_missing') }}{% endif %}
+      · ZeroTier: {% if vpn.zerotier_installed %}{{ _('common.ok') }}{% else %}{{ _('config.vpn_pkg_missing') }}{% endif %}
+      · {{ _('config.vpn_boot_service') }}:
+      {% if vpn.boot_service_enabled %}{{ _('common.yes') }}{% else %}{{ _('common.no') }}{% endif %}
+    </p>
+    <form method="post" action="/configuration/network/vpn-save" class="form-row vpn-form">
+      <input type="hidden" name="iface" value="{{ selected_iface }}">
+      <label>{{ _('config.vpn_provider') }}
+        <select name="provider" id="vpn-provider">
+          <option value="none" {% if vpn.state.provider == 'none' %}selected{% endif %}>{{ _('config.vpn_none') }}</option>
+          <option value="openvpn" {% if vpn.state.provider == 'openvpn' %}selected{% endif %}>OpenVPN</option>
+          <option value="zerotier" {% if vpn.state.provider == 'zerotier' %}selected{% endif %}>ZeroTier</option>
+        </select>
+      </label>
+      <label><input type="checkbox" name="vpn_enabled" value="true" {% if vpn.state.enabled %}checked{% endif %}> {{ _('config.vpn_enable') }}</label>
+      <label><input type="checkbox" name="connect_on_boot" value="true" {% if vpn.state.connect_on_boot %}checked{% endif %}> {{ _('config.vpn_on_boot') }}</label>
+      <label><input type="checkbox" name="connect_now" value="true"> {{ _('config.vpn_connect_now') }}</label>
+      <div id="vpn-openvpn-fields" class="vpn-panel">
+        <p class="muted">{{ _('config.vpn_openvpn_hint') }}</p>
+        {% if vpn.state.openvpn_has_profile %}
+        <p>{{ _('config.vpn_profile_ok') }}: <code>/etc/delatometry/openvpn/client.ovpn</code></p>
+        {% endif %}
+        <label>{{ _('config.vpn_openvpn_user') }} <input name="openvpn_username" value="{{ vpn.state.openvpn_username }}" autocomplete="off"></label>
+        <label>{{ _('config.vpn_openvpn_pass') }} <input type="password" name="openvpn_password" autocomplete="new-password" placeholder="{% if vpn.state.openvpn_username %}{{ _('config.vpn_pass_unchanged') }}{% endif %}"></label>
+      </div>
+      <div id="vpn-zerotier-fields" class="vpn-panel">
+        <label>{{ _('config.vpn_zt_network_id') }}
+          <input name="zerotier_network_id" value="{{ vpn.state.zerotier_network_id }}" pattern="[0-9a-fA-F]{16}" maxlength="16" placeholder="8056c2e21c000001">
+        </label>
+        <p class="muted">{{ _('config.vpn_zt_hint') }}</p>
+      </div>
+      <button type="submit">{{ _('config.vpn_save') }}</button>
+    </form>
+    <form method="post" action="/configuration/network/vpn-upload" enctype="multipart/form-data" class="form-row vpn-panel" id="vpn-upload-form">
+      <input type="hidden" name="iface" value="{{ selected_iface }}">
+      <label>{{ _('config.vpn_upload') }} <input type="file" name="ovpn_file" accept=".ovpn,.conf"></label>
+      <button type="submit">{{ _('config.vpn_upload_btn') }}</button>
+    </form>
+    <div class="form-row">
+      <form method="post" action="/configuration/network/vpn-connect" class="inline">
+        <input type="hidden" name="iface" value="{{ selected_iface }}">
+        <button type="submit">{{ _('config.vpn_connect') }}</button>
+      </form>
+      <form method="post" action="/configuration/network/vpn-disconnect" class="inline">
+        <input type="hidden" name="iface" value="{{ selected_iface }}">
+        <button type="submit" class="danger">{{ _('config.vpn_disconnect') }}</button>
+      </form>
+    </div>
+
     <p>Hotspot: {{ hotspot_status }} (SSID {{ hotspot_ssid }})</p>
     {% if is_wifi %}
     <h3>Wi‑Fi client</h3>
@@ -172,4 +231,22 @@
     </form>
   </section>
 </details>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  const sel = document.getElementById('vpn-provider');
+  const ovpn = document.getElementById('vpn-openvpn-fields');
+  const zt = document.getElementById('vpn-zerotier-fields');
+  const upload = document.getElementById('vpn-upload-form');
+  function sync() {
+    const p = sel ? sel.value : 'none';
+    if (ovpn) ovpn.style.display = p === 'openvpn' ? 'block' : 'none';
+    if (zt) zt.style.display = p === 'zerotier' ? 'block' : 'none';
+    if (upload) upload.style.display = p === 'openvpn' ? 'flex' : 'none';
+  }
+  if (sel) sel.addEventListener('change', sync);
+  sync();
+})();
+</script>
 {% endblock %}

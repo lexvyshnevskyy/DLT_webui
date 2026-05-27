@@ -1137,17 +1137,20 @@ class WebHMINode(Node):
         }
 
     def ui_stop_program(self) -> Tuple[str, str]:
-        if not self._core_available() and self._experiment.program_id is not None:
-            return self._core_unavailable_message(), self._experiment_banner()
-        program_id = self._experiment.program_id
-        if program_id is None:
-            try:
-                self._core_query({'temperature_control': {'enabled': False}})
-                return 'No active program. Control disabled.', self._experiment_banner()
-            except Exception as exc:
-                return f'ERROR: {exc}', self._experiment_banner()
-        self._finish_active_program('Stopped')
-        return f'Program {program_id} stopped.', self._experiment_banner()
+        with self._lock:
+            program_id = self._experiment.program_id
+        if program_id is not None:
+            self._finish_active_program('Stopped')
+            self._mark_programs_stopped_in_db()
+            return f'Program {program_id} stopped.', self._experiment_banner()
+        self._halt_temperature_control('stop from experiment page')
+        stopped_ids = self._mark_programs_stopped_in_db()
+        if stopped_ids:
+            return (
+                f'Control stopped. Marked Stopped in database: {stopped_ids}.',
+                self._experiment_banner(),
+            )
+        return 'No active program. Control disabled.', self._experiment_banner()
 
     def _current_theoretical_temp_k(self) -> Optional[float]:
         """Program ramp target or manual/core setpoint for experiment chart agenda."""

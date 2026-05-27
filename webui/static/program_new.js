@@ -2,8 +2,6 @@
   const form = document.getElementById('program-new-form');
   if (!form) return;
 
-  const tMin = parseFloat(form.dataset.tMin || '40');
-  const tMax = parseFloat(form.dataset.tMax || '1600');
   const descInput = document.getElementById('program-description');
   const summaryEl = document.getElementById('steps-validation-summary');
   const createBtn = document.getElementById('create-program-btn');
@@ -13,50 +11,72 @@
   const badgeE720 = document.getElementById('badge-e720');
   const sectionSteps = document.getElementById('section-steps');
   const sectionE720 = document.getElementById('section-e720');
-  const sectionAddStep = document.getElementById('section-add-step');
+  const stepsListBlock = document.getElementById('steps-list-block');
   const stepsTable = document.getElementById('steps-table');
+  const addStepBtn = document.getElementById('add-step-btn');
+  const addTStart = document.getElementById('add-t-start');
+  const addTStop = document.getElementById('add-t-stop');
+  const addMinutes = document.getElementById('add-minutes');
+  const addStepHint = document.getElementById('add-step-hint');
+  const msg = {
+    addLocked: form.dataset.msgAddLocked || '',
+    addInvalid: form.dataset.msgAddInvalid || '',
+    addFail: form.dataset.msgAddFail || '',
+    createHint: form.dataset.msgCreateHint || '',
+    createReady: form.dataset.msgCreateReady || '',
+    createTitleBlocked: form.dataset.msgCreateTitleBlocked || '',
+    createTitleReady: form.dataset.msgCreateTitleReady || '',
+    required: form.dataset.labelRequired || 'Required',
+    incomplete: form.dataset.labelIncomplete || 'Incomplete',
+    ok: form.dataset.labelOk || 'OK',
+  };
+  const addStepBtnDefault = addStepBtn ? addStepBtn.textContent : '';
 
   let validateTimer = null;
 
-  function setSectionLocked(el, locked) {
-    if (!el) return;
-    el.classList.toggle('section-locked', locked);
-    el.querySelectorAll('input, select, button, textarea').forEach(function (control) {
+  function descriptionFilled() {
+    return !!(descInput && descInput.value.trim().length > 0);
+  }
+
+  function setControlsDisabled(root, disabled) {
+    if (!root) return;
+    root.querySelectorAll('input, select, button, textarea').forEach(function (control) {
       if (control.id === 'create-program-btn') return;
-      if (control.closest('form') && control.closest('form') !== form) return;
-      control.disabled = locked;
+      control.disabled = disabled;
     });
   }
 
-  function readRows() {
-    const rows = [];
-    if (!stepsTable) return rows;
-    stepsTable.querySelectorAll('tbody tr[data-step-id]').forEach(function (tr) {
-      const id = parseInt(tr.dataset.stepId, 10);
-      const tStart = tr.querySelector('[data-field="t_start"]');
-      const tStop = tr.querySelector('[data-field="t_stop"]');
-      const minutes = tr.querySelector('[data-field="minutes"]');
-      if (!tStart || !tStop || !minutes) return;
-      rows.push([
-        id,
-        parseFloat(tStart.value),
-        parseFloat(tStop.value),
-        parseFloat(minutes.value),
-      ]);
-    });
-    return rows;
+  function syncSectionAccess() {
+    const descOk = descriptionFilled();
+
+    if (sectionSteps) {
+      sectionSteps.classList.toggle('section-locked', !descOk);
+    }
+    setControlsDisabled(stepsListBlock, !descOk);
+
+    if (addTStart) addTStart.disabled = !descOk;
+    if (addTStop) addTStop.disabled = !descOk;
+    if (addMinutes) addMinutes.disabled = !descOk;
+    if (addStepBtn) addStepBtn.disabled = !descOk;
+    if (addStepHint) {
+      if (descOk) {
+        addStepHint.style.display = 'none';
+      } else {
+        addStepHint.textContent = msg.addLocked;
+        addStepHint.style.display = 'block';
+      }
+    }
+
+    if (sectionE720 && !descOk) {
+      sectionE720.classList.add('section-locked');
+      setControlsDisabled(sectionE720, true);
+    }
   }
 
-  function readE720() {
-    const freqs = [];
-    form.querySelectorAll('input[name="enabled_freqs"]:checked').forEach(function (cb) {
-      freqs.push(cb.value);
-    });
-    return {
-      sweep_mode: parseInt(form.querySelector('#sweep-mode')?.value || '0', 10),
-      enabled_freqs: freqs,
-      range_max: parseFloat(form.querySelector('#range-max')?.value || '0'),
-    };
+  function setE720Locked(locked) {
+    if (!sectionE720) return;
+    sectionE720.classList.toggle('section-locked', locked);
+    setControlsDisabled(sectionE720, locked);
   }
 
   function applyIssueHighlights(issues) {
@@ -107,38 +127,37 @@
     const e720Ok = !!(data && data.e720_ok);
 
     if (badgeDesc) {
-      badgeDesc.textContent = descOk ? 'OK' : 'Required';
+      badgeDesc.textContent = descOk ? msg.ok : msg.required;
       badgeDesc.className = 'section-badge ' + (descOk ? 'ok' : 'pending');
     }
     if (badgeSteps) {
-      badgeSteps.textContent = stepsOk ? 'OK' : 'Incomplete';
+      badgeSteps.textContent = stepsOk ? msg.ok : msg.incomplete;
       badgeSteps.className = 'section-badge ' + (stepsOk ? 'ok' : 'pending');
     }
     if (badgeE720) {
-      badgeE720.textContent = e720Ok ? 'OK' : 'Incomplete';
+      badgeE720.textContent = e720Ok ? msg.ok : msg.incomplete;
       badgeE720.className = 'section-badge ' + (e720Ok ? 'ok' : 'pending');
     }
 
-    const descFilled = descInput && descInput.value.trim().length > 0;
-    setSectionLocked(sectionSteps, !descFilled);
-    setSectionLocked(sectionAddStep, !descFilled);
-    setSectionLocked(sectionE720, !descFilled || !stepsOk);
+    syncSectionAccess();
+    if (descriptionFilled()) {
+      setE720Locked(!stepsOk);
+    }
   }
 
   function updateCreateButton(data) {
     const can = !!(data && data.can_create);
     if (createBtn) {
       createBtn.disabled = !can;
-      createBtn.title = can ? 'Save program to database' : 'Complete all sections above';
+      createBtn.title = can ? msg.createTitleReady : msg.createTitleBlocked;
     }
     if (createHint) {
-      createHint.textContent = can
-        ? 'All checks passed — you can create the program.'
-        : 'Complete description, valid temperature steps, and E7-20 settings.';
+      createHint.textContent = can ? msg.createReady : msg.createHint;
     }
   }
 
   function validateRemote() {
+    syncSectionAccess();
     const body = new FormData(form);
     return fetch('/program-new/validate', {
       method: 'POST',
@@ -155,6 +174,7 @@
       })
       .catch(function () {
         if (createBtn) createBtn.disabled = true;
+        syncSectionAccess();
       });
   }
 
@@ -163,21 +183,84 @@
     validateTimer = setTimeout(validateRemote, 180);
   }
 
+  function submitAddStep() {
+    if (!descriptionFilled()) {
+      if (addStepHint) addStepHint.style.display = 'block';
+      return;
+    }
+    const tStart = parseFloat(addTStart && addTStart.value);
+    const tStop = parseFloat(addTStop && addTStop.value);
+    const minutes = parseFloat(addMinutes && addMinutes.value);
+    if ([tStart, tStop, minutes].some(function (v) { return Number.isNaN(v); })) {
+      if (addStepHint) {
+        addStepHint.textContent = msg.addInvalid;
+        addStepHint.style.display = 'block';
+      }
+      return;
+    }
+    if (addStepBtn) {
+      addStepBtn.disabled = true;
+      addStepBtn.textContent = 'Adding…';
+    }
+    const body = new URLSearchParams();
+    body.set('t_start', String(tStart));
+    body.set('t_stop', String(tStop));
+    body.set('minutes', String(minutes));
+    if (descInput) {
+      body.set('description', descInput.value.trim());
+    }
+    fetch('/program-new/steps/add', {
+      method: 'POST',
+      body: body,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    })
+      .then(function (r) {
+        if (r.redirected) {
+          window.location.href = r.url;
+          return;
+        }
+        window.location.href = '/program-new';
+      })
+      .catch(function () {
+        if (addStepBtn) {
+          addStepBtn.disabled = false;
+          addStepBtn.textContent = addStepBtnDefault;
+        }
+        if (addStepHint) {
+          addStepHint.textContent = msg.addFail;
+          addStepHint.style.display = 'block';
+        }
+      });
+  }
+
   form.addEventListener('input', scheduleValidate);
   form.addEventListener('change', scheduleValidate);
   if (descInput) {
-    descInput.addEventListener('input', scheduleValidate);
+    descInput.addEventListener('input', function () {
+      syncSectionAccess();
+      scheduleValidate();
+    });
   }
 
   form.addEventListener('submit', function (ev) {
+    const submitter = ev.submitter;
+    if (submitter && submitter.getAttribute('formaction')) {
+      return;
+    }
     if (createBtn && createBtn.disabled) {
       ev.preventDefault();
       validateRemote();
     }
   });
 
+  if (addStepBtn) {
+    addStepBtn.addEventListener('click', submitAddStep);
+  }
+
   document.addEventListener('program-new-steps-changed', scheduleValidate);
 
+  syncSectionAccess();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', scheduleValidate);
   } else {

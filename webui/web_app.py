@@ -8,10 +8,12 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from webui.i18n import COOKIE_NAME, _, bind_locale, get_locale, resolve_locale
 from webui.web_paths import static_dir, templates_dir
 from webui.routes import config, dashboard, experiment, programs
 
@@ -80,11 +82,21 @@ class BasicAuthMiddleware:
         await response(scope, receive, send)
 
 
+class LocaleMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        bind_locale(resolve_locale(request))
+        return await call_next(request)
+
+
 def create_app(node: 'WebHMINode') -> FastAPI:
     app = FastAPI(title=node.title)
     templates = Jinja2Templates(directory=str(templates_dir()))
+    templates.env.globals['_'] = _
+    templates.env.globals['get_locale'] = get_locale
     app.state.node = node
     app.state.templates = templates
+
+    app.add_middleware(LocaleMiddleware)
 
     static_path = static_dir()
     if static_path.is_dir():
@@ -117,6 +129,18 @@ def create_app(node: 'WebHMINode') -> FastAPI:
     @app.get('/')
     async def root() -> RedirectResponse:
         return RedirectResponse(url='/dashboard', status_code=302)
+
+    @app.get('/set-locale/{locale_code}')
+    async def set_locale(request: Request, locale_code: str) -> RedirectResponse:
+        from webui.i18n import normalize_locale
+
+        loc = normalize_locale(locale_code)
+        target = request.query_params.get('next') or request.headers.get('referer') or '/dashboard'
+        if target.startswith('/set-locale'):
+            target = '/dashboard'
+        response = RedirectResponse(url=target, status_code=303)
+        response.set_cookie(COOKIE_NAME, loc, max_age=365 * 86400, path='/', samesite='lax')
+        return response
 
     @app.on_event('startup')
     async def _log_routes() -> None:

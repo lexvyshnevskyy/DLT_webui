@@ -20,13 +20,16 @@ class ValidationIssue:
     severity: str = 'error'  # error | warning
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             'step_id': self.step_id,
             'field': self.field,
             'code': self.code,
             'message': self.message,
             'severity': self.severity,
         }
+        if self.step_id and 'prev_step' not in d:
+            d['prev_step'] = self.step_id - 1
+        return d
 
 
 @dataclass

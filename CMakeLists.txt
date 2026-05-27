@@ -32,6 +32,7 @@ install(DIRECTORY
 install(DIRECTORY
   webui/templates
   webui/static
+  webui/locale
   DESTINATION share/${PROJECT_NAME}
 )
 

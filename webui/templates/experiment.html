@@ -5,48 +5,48 @@
 {% endblock %}
 {% block content %}
 <div id="experiment-live" data-ws="/ws/experiment" hidden></div>
-<h1>Experiment</h1>
+<h1>{{ _('experiment.title') }}</h1>
 
 <section class="card">
-  <h2>Status</h2>
-  <p id="exp-banner" class="banner">Connecting…</p>
+  <h2>{{ _('experiment.status') }}</h2>
+  <p id="exp-banner" class="banner">{{ _('common.connecting') }}</p>
 </section>
 
 <section class="grid-2">
   <section class="card">
-    <h2>LTM temperature</h2>
+    <h2>{{ _('experiment.ltm') }}</h2>
     <pre id="ltm-summary" class="mono"></pre>
     <canvas id="temp-chart" height="120"></canvas>
     <table class="data" id="meas-table">
       <thead><tr><th>Ch</th><th>Type</th><th>Value</th><th>Valid</th><th>Age s</th></tr></thead>
       <tbody></tbody>
     </table>
-    <h3>LTM stream</h3>
+    <h3>{{ _('experiment.ltm_stream') }}</h3>
     <pre id="ltm-stream" class="log stream"></pre>
   </section>
   <section class="card">
-    <h2>E7-20</h2>
+    <h2>{{ _('experiment.e720') }}</h2>
     <pre id="e720-summary" class="mono"></pre>
     <table class="data" id="e720-table">
       <thead><tr><th>Online</th><th>Ch1 param</th><th>Ch1</th><th>Ch2 param</th><th>Ch2</th><th>Freq</th><th>Level</th><th>Offset</th><th>Range</th></tr></thead>
       <tbody><tr></tr></tbody>
     </table>
-    <h3>E7-20 stream</h3>
+    <h3>{{ _('experiment.e720_stream') }}</h3>
     <pre id="e720-stream" class="log stream"></pre>
   </section>
 </section>
 
 <section class="card">
-  <h2>Core temperature control</h2>
+  <h2>{{ _('experiment.core_control') }}</h2>
   <pre id="core-json" class="mono"></pre>
 </section>
 
 <section class="card">
-  <h2>Manual target</h2>
+  <h2>{{ _('experiment.manual') }}</h2>
   <form method="post" action="/experiment/manual" class="form-row">
-    <label>Target K <input type="number" name="target_k" step="0.1" value="300"></label>
-    <label><input type="checkbox" name="enabled" value="true"> Enable control</label>
-    <button type="submit">Apply</button>
+    <label>{{ _('experiment.target_k') }} <input type="number" name="target_k" step="0.1" value="300"></label>
+    <label><input type="checkbox" name="enabled" value="true"> {{ _('experiment.enable_control') }}</label>
+    <button type="submit">{{ _('common.apply') }}</button>
   </form>
 </section>
 {% endblock %}

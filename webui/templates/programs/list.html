@@ -2,13 +2,13 @@
 {% set active = 'programs' %}
 {% block content %}
 <div class="page-head">
-  <h1>Programs</h1>
-  <a class="btn primary" href="/program-new?new=1">New program</a>
+  <h1>{{ _('programs.title') }}</h1>
+  <a class="btn primary" href="/program-new?new=1">{{ _('programs.new') }}</a>
 </div>
 
 <table class="data programs-table">
   <thead>
-    <tr><th>ID</th><th>Created</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>{{ _('programs.col_id') }}</th><th>{{ _('programs.col_created') }}</th><th>{{ _('programs.col_status') }}</th><th>{{ _('common.actions') }}</th></tr>
   </thead>
   <tbody>
   {% for row in programs %}
@@ -17,16 +17,18 @@
       <td><a href="/program-view?id={{ row[0] }}">{{ row[1] }}</a></td>
       <td>{{ row[2] }}</td>
       <td class="actions">
-        <a href="/program-edit?id={{ row[0] }}">Edit</a>
-        <a href="/programs/export?id={{ row[0] }}">Export ZIP</a>
-        <form method="post" action="/programs/delete" class="inline" onsubmit="return confirm('Delete program {{ row[0] }} and all measurements?');">
+        <a href="/program-edit?id={{ row[0] }}">{{ _('programs.edit') }}</a>
+        <a href="/programs/export?id={{ row[0] }}">{{ _('programs.export') }}</a>
+        <form method="post" action="/programs/delete" class="inline"
+              data-confirm-msg="{{ _('programs.delete_confirm', id=row[0]) }}"
+              onsubmit="return confirm(this.getAttribute('data-confirm-msg'));">
           <input type="hidden" name="id" value="{{ row[0] }}">
-          <button type="submit" class="danger">Delete</button>
+          <button type="submit" class="danger">{{ _('programs.delete') }}</button>
         </form>
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="4">No programs in database.</td></tr>
+    <tr><td colspan="4">{{ _('programs.empty') }}</td></tr>
   {% endfor %}
   </tbody>
 </table>

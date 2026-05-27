@@ -5,6 +5,8 @@ from typing import List
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from webui.render import template_response
+
 router = APIRouter()
 
 
@@ -16,7 +18,7 @@ def _tpl(request: Request):
 async def configuration_page(request: Request, iface: str = '') -> HTMLResponse:
     templates, node = _tpl(request)
     ctx = node.get_configuration_context(iface or None)
-    return templates.TemplateResponse(request, 'config.html', ctx)
+    return template_response(templates, request, 'config.html', ctx)
 
 
 @router.post('/configuration/reload')

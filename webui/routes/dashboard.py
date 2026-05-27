@@ -7,6 +7,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from webui.render import template_response
+
 router = APIRouter()
 
 
@@ -23,7 +25,7 @@ async def dashboard_page(request: Request, msg: str = Query('')) -> HTMLResponse
     templates, node = _tpl(request)
     ctx = node.get_dashboard_context()
     ctx['message'] = msg
-    return templates.TemplateResponse(request, 'dashboard.html', ctx)
+    return template_response(templates, request, 'dashboard.html', ctx)
 
 
 @router.post('/dashboard/service')

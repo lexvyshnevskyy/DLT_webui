@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% set active = 'config' %}
 {% block content %}
-<h1>Configuration</h1>
-<p class="muted">Settings in <code>{{ env_file }}</code>. Enable <strong>Restart service</strong> to apply immediately.</p>
+<h1>{{ _('config.title') }}</h1>
+<p class="muted">{{ _('config.env_hint', path=env_file) }}</p>
 <p>{{ status }}</p>
 
 <details class="config-section" open>
-  <summary>Network</summary>
+  <summary>{{ _('config.network') }}</summary>
   <section class="card">
     <table class="data">
       <thead><tr><th>Interface</th><th>State</th><th>MAC</th><th>IPv4</th></tr></thead>

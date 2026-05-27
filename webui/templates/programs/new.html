@@ -2,21 +2,31 @@
 {% set active = 'programs' %}
 {% block content %}
 <div class="page-head">
-  <h1>New program</h1>
-  <a href="/programs">← Programs</a>
+  <h1>{{ _('program_new.title') }}</h1>
+  <a href="/programs">{{ _('programs.back') }}</a>
 </div>
 
 <form method="post" action="/program-new" id="program-new-form" class="program-wizard"
-      data-t-min="{{ t_limits.t_min_k }}" data-t-max="{{ t_limits.t_max_k }}">
+      data-t-min="{{ t_limits.t_min_k }}" data-t-max="{{ t_limits.t_max_k }}"
+      data-msg-add-locked="{{ _('program_new.add_step_locked') }}"
+      data-msg-add-invalid="{{ _('program_new.add_step_invalid') }}"
+      data-msg-add-fail="{{ _('program_new.add_step_fail') }}"
+      data-msg-create-hint="{{ _('program_new.create_hint') }}"
+      data-msg-create-ready="{{ _('program_new.create_ready') }}"
+      data-msg-create-title-blocked="{{ _('program_new.create_title_blocked') }}"
+      data-msg-create-title-ready="{{ _('program_new.create_title_ready') }}"
+      data-label-required="{{ _('common.required') }}"
+      data-label-incomplete="{{ _('common.incomplete') }}"
+      data-label-ok="{{ _('common.ok') }}">
 
   <section class="card program-wizard-section" id="section-description">
     <div class="section-head">
-      <h2>1. Program description</h2>
-      <span class="section-badge" id="badge-description" aria-live="polite">Required</span>
+      <h2>{{ _('program_new.section_description') }}</h2>
+      <span class="section-badge" id="badge-description" aria-live="polite">{{ _('common.required') }}</span>
     </div>
-    <p class="muted">Name or describe this temperature program. Other sections unlock after this is filled in.</p>
+    <p class="muted">{{ _('program_new.desc_hint') }}</p>
     <label class="field-block">
-      Description <span class="req">*</span>
+      {{ _('program_new.description') }} <span class="req">*</span>
       <input type="text"
              id="program-description"
              name="description"
@@ -29,110 +39,129 @@
     </label>
   </section>
 
-  <section class="card program-wizard-section section-locked" id="section-steps">
+  <section class="card program-wizard-section" id="section-steps">
     <div class="section-head">
-      <h2>2. Temperature steps</h2>
-      <span class="section-badge" id="badge-steps" aria-live="polite">Incomplete</span>
+      <h2>{{ _('program_new.section_steps') }}</h2>
+      <span class="section-badge" id="badge-steps" aria-live="polite">{{ _('common.incomplete') }}</span>
     </div>
     <p class="muted">
-      Allowed range: <strong>{{ t_limits.t_min_k|int }}–{{ t_limits.t_max_k|int }} K</strong>.
-      Steps must chain without gaps: each step’s <em>start</em> must equal the previous step’s <em>stop</em>.
-      Example: step 1 → 40–100 K, step 2 must start at <strong>100</strong> K (not 200 K).
+      {{ _('program_new.steps_range', t_min=t_limits.t_min_k|int, t_max=t_limits.t_max_k|int) }}
+      {{ _('program_new.steps_chain') }}
+      {{ _('program_new.steps_example') }}
     </p>
 
     <div id="steps-validation-summary" class="validation-summary" role="alert" aria-live="polite"></div>
 
-    <table class="data steps-edit-table" data-mode="new" id="steps-table">
-      <thead>
-        <tr><th>#</th><th>t_start K</th><th>t_stop K</th><th>minutes</th><th></th></tr>
-      </thead>
-      <tbody>
-      {% for row in steps %}
-        <tr data-step-id="{{ row[0] }}">
-          <td>{{ row[0] }}</td>
-          <td>
-            <input type="number" name="step_{{ row[0] }}_t_start" value="{{ row[1] }}" step="0.1"
-                   min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
-                   class="step-input" data-field="t_start" required>
-          </td>
-          <td>
-            <input type="number" name="step_{{ row[0] }}_t_stop" value="{{ row[2] }}" step="0.1"
-                   min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
-                   class="step-input" data-field="t_stop" required>
-          </td>
-          <td>
-            <input type="number" name="step_{{ row[0] }}_minutes" value="{{ row[3] }}" step="0.1"
-                   min="0.1" class="step-input" data-field="minutes" required>
-          </td>
-          <td class="actions">
-            <button type="submit"
-                    formaction="/program-new/steps/remove"
-                    formmethod="post"
-                    class="danger"
-                    name="step_id"
-                    value="{{ row[0] }}">Remove</button>
-            <span class="step-save-status" aria-live="polite"></span>
-          </td>
-        </tr>
-      {% else %}
-        <tr class="steps-empty-row"><td colspan="5">No steps yet — add at least one below.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    <div class="steps-blocks-shell">
+      <div class="steps-blocks">
+        <div class="wizard-inner-block steps-list-block" id="steps-list-block">
+          <div class="inner-block-head">
+            <h3>{{ _('program_new.step_list') }}</h3>
+            <span class="inner-block-hint muted">{{ _('program_new.step_list_hint') }}</span>
+          </div>
+          <div class="inner-block-body inner-block-body--flush">
+            <table class="data steps-edit-table" data-mode="new" id="steps-table">
+              <thead>
+                <tr><th>{{ _('program_new.col_step') }}</th><th>{{ _('program_new.col_t_start') }}</th><th>{{ _('program_new.col_t_stop') }}</th><th>{{ _('program_new.col_minutes') }}</th><th></th></tr>
+              </thead>
+              <tbody>
+              {% for row in steps %}
+                <tr data-step-id="{{ row[0] }}">
+                  <td>{{ row[0] }}</td>
+                  <td>
+                    <input type="number" name="step_{{ row[0] }}_t_start" value="{{ row[1] }}" step="0.1"
+                           min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                           class="step-input" data-field="t_start" required>
+                  </td>
+                  <td>
+                    <input type="number" name="step_{{ row[0] }}_t_stop" value="{{ row[2] }}" step="0.1"
+                           min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                           class="step-input" data-field="t_stop" required>
+                  </td>
+                  <td>
+                    <input type="number" name="step_{{ row[0] }}_minutes" value="{{ row[3] }}" step="0.1"
+                           min="0.1" class="step-input" data-field="minutes" required>
+                  </td>
+                  <td class="actions">
+                    <button type="submit"
+                            formaction="/program-new/steps/remove"
+                            formmethod="post"
+                            class="danger"
+                            name="step_id"
+                            value="{{ row[0] }}">{{ _('common.remove') }}</button>
+                    <span class="step-save-status" aria-live="polite"></span>
+                  </td>
+                </tr>
+              {% else %}
+                <tr class="steps-empty-row">
+                  <td colspan="5">{{ _('program_new.no_steps') }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="wizard-inner-block add-step-block" id="section-add-step">
+          <div class="inner-block-head">
+            <h3>{{ _('program_new.add_step') }}</h3>
+          </div>
+          <div class="inner-block-body">
+            <div class="form-row add-step-form" id="add-step-fields">
+              <label>{{ _('program_new.col_t_start') }}
+                <input type="number" id="add-t-start" step="0.1"
+                       min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                       value="{{ default_step[0] }}">
+              </label>
+              <label>{{ _('program_new.col_t_stop') }}
+                <input type="number" id="add-t-stop" step="0.1"
+                       min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                       value="{{ default_step[1] }}">
+              </label>
+              <label>{{ _('program_new.col_minutes') }}
+                <input type="number" id="add-minutes" step="0.1" min="0.1" value="{{ default_step[2] }}">
+              </label>
+              <button type="button" class="btn primary" id="add-step-btn" disabled>{{ _('program_new.add_step_btn') }}</button>
+            </div>
+            <p class="muted add-step-hint" id="add-step-hint">{{ _('program_new.add_step_locked') }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <section class="card program-wizard-section section-locked" id="section-e720">
     <div class="section-head">
-      <h2>3. E7-20 sweep</h2>
-      <span class="section-badge" id="badge-e720" aria-live="polite">Incomplete</span>
+      <h2>{{ _('program_new.section_e720') }}</h2>
+      <span class="section-badge" id="badge-e720" aria-live="polite">{{ _('common.incomplete') }}</span>
     </div>
-    <label>Mode
+    <label>{{ _('program_new.e720_mode') }}
       <select name="sweep_mode" id="sweep-mode">
         {% for label, key in e720.modes %}
-        <option value="{{ key }}">{{ label }}</option>
+        <option value="{{ key }}"{% if key == sweep_mode %} selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
     </label>
     <fieldset>
-      <legend>Enabled frequencies (Hz)</legend>
+      <legend>{{ _('program_new.e720_freqs') }}</legend>
       <div class="freq-grid" id="enabled-freqs">
         {% for f in e720.frequencies %}
-        <label><input type="checkbox" name="enabled_freqs" value="{{ f }}"{% if f == '1000' %} checked{% endif %}> {{ f }}</label>
+        <label><input type="checkbox" name="enabled_freqs" value="{{ f }}"{% if f in enabled_freqs %} checked{% endif %}> {{ f }}</label>
         {% endfor %}
       </div>
     </fieldset>
-    <label>Range max Hz
-      <input type="number" name="range_max" id="range-max" value="10000" step="1" min="1">
+    <label>{{ _('program_new.e720_range_max') }}
+      <input type="number" name="range_max" id="range-max" value="{{ range_max }}" step="1" min="1">
     </label>
   </section>
 
   <div class="wizard-actions">
-    <button type="submit" class="btn primary" id="create-program-btn" disabled title="Complete all sections above">
-      Create program
+    <button type="submit" class="btn primary" id="create-program-btn" disabled title="{{ _('program_new.create_title_blocked') }}">
+      {{ _('program_new.create') }}
     </button>
-    <p class="muted" id="create-hint">Complete description, valid temperature steps, and E7-20 settings.</p>
+    <p class="muted" id="create-hint">{{ _('program_new.create_hint') }}</p>
   </div>
 </form>
-
-<section class="card program-wizard-section section-locked" id="section-add-step">
-  <h3>Add temperature step</h3>
-  <form method="post" action="/program-new/steps/add" class="form-row" id="add-step-form">
-    <label>t_start K
-      <input type="number" name="t_start" step="0.1"
-             min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
-             value="{{ default_step[0] }}" required>
-    </label>
-    <label>t_stop K
-      <input type="number" name="t_stop" step="0.1"
-             min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
-             value="{{ default_step[1] }}" required>
-    </label>
-    <label>minutes
-      <input type="number" name="minutes" step="0.1" min="0.1" value="{{ default_step[2] }}" required>
-    </label>
-    <button type="submit" class="btn">Add step</button>
-  </form>
-</section>
 {% endblock %}
 {% block scripts %}
 <script src="/static/program_steps.js" defer></script>

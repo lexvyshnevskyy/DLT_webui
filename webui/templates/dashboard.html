@@ -2,41 +2,41 @@
 {% set active = 'dashboard' %}
 {% block content %}
 <div id="dashboard-live" data-ws="/ws/dashboard" data-poll="/dashboard/snapshot" hidden></div>
-<h1>Dashboard</h1>
-<p class="muted">Live refresh ~1 Hz (WebSocket). Service buttons still use normal form POST.</p>
+<h1>{{ _('dashboard.title') }}</h1>
+<p class="muted">{{ _('dashboard.live_hint') }}</p>
 
 <section class="card" id="dash-system">
-  <h2>System status</h2>
+  <h2>{{ _('dashboard.system_status') }}</h2>
   <ul class="kv" id="dash-system-kv">
-    <li><span>Core</span><strong id="dash-core" class="{{ 'ok' if services.core_available else 'err' }}">{{ 'OK' if services.core_available else 'DOWN' }}</strong></li>
-    <li><span>Database</span><strong id="dash-db" class="{{ 'ok' if services.database_available else 'err' }}">{{ 'OK' if services.database_available else 'DOWN' }}</strong></li>
-    <li><span>Ready</span><strong id="dash-ready">{{ 'yes' if services.system_ready else 'no' }}</strong></li>
+    <li><span>{{ _('dashboard.core') }}</span><strong id="dash-core" class="{{ 'ok' if services.core_available else 'err' }}">{{ _('common.ok') if services.core_available else _('common.down') }}</strong></li>
+    <li><span>{{ _('dashboard.database') }}</span><strong id="dash-db" class="{{ 'ok' if services.database_available else 'err' }}">{{ _('common.ok') if services.database_available else _('common.down') }}</strong></li>
+    <li><span>{{ _('dashboard.ready') }}</span><strong id="dash-ready">{{ _('common.yes') if services.system_ready else _('common.no') }}</strong></li>
     <li id="dash-pwm-row" {% if not services.pwm_note %}style="display:none"{% endif %}><span>PWM</span><em id="dash-pwm">{{ services.pwm_note or '' }}</em></li>
   </ul>
 </section>
 
 <section class="card" id="dash-host">
-  <h2>Host</h2>
+  <h2>{{ _('dashboard.host') }}</h2>
   <ul class="kv" id="dash-host-kv">
     {% if host.error %}
-    <li><span>Error</span><strong class="err">{{ host.error }}</strong></li>
+    <li><span>{{ _('common.error') }}</span><strong class="err">{{ host.error }}</strong></li>
     {% else %}
-    <li><span>CPU</span><strong id="dash-cpu">{{ host.cpu_percent }}%</strong></li>
-    <li><span>Load</span><strong id="dash-load">{{ host.load_avg }}</strong></li>
-    <li><span>Memory</span><strong id="dash-mem">{{ host.memory_percent }}% ({{ host.memory_used_gb }}/{{ host.memory_total_gb }} GB)</strong></li>
+    <li><span>{{ _('dashboard.cpu') }}</span><strong id="dash-cpu">{{ host.cpu_percent }}%</strong></li>
+    <li><span>{{ _('dashboard.load') }}</span><strong id="dash-load">{{ host.load_avg }}</strong></li>
+    <li><span>{{ _('dashboard.memory') }}</span><strong id="dash-mem">{{ host.memory_percent }}% ({{ host.memory_used_gb }}/{{ host.memory_total_gb }} GB)</strong></li>
     {% endif %}
   </ul>
 </section>
 
 <section class="card" id="dash-services">
-  <h2>Services</h2>
+  <h2>{{ _('dashboard.services') }}</h2>
   {% if not enable_service_control %}
-  <p class="muted">Service control is disabled (enable_service_control:=true).</p>
+  <p class="muted">{{ _('dashboard.service_control_disabled') }}</p>
   {% else %}
-  <p class="muted">Requires passwordless sudo for systemctl — run <code>sudo bash src/webui/scripts/install_sudoers.sh</code> on the Pi.</p>
+  <p class="muted">{{ _('dashboard.service_sudo_hint') }}</p>
   {% endif %}
   <table class="data">
-    <thead><tr><th>Unit</th><th>Active</th><th>Sub</th><th>Actions</th></tr></thead>
+    <thead><tr><th>{{ _('dashboard.unit') }}</th><th>{{ _('dashboard.active') }}</th><th>{{ _('dashboard.sub') }}</th><th>{{ _('common.actions') }}</th></tr></thead>
     <tbody id="dash-services-tbody">
     {% for row in units %}
       <tr data-unit="{{ row[0] }}">
@@ -48,17 +48,17 @@
           <form method="post" action="/dashboard/service" class="inline">
             <input type="hidden" name="unit" value="{{ row[0] }}">
             <input type="hidden" name="action" value="start">
-            <button type="submit">start</button>
+            <button type="submit">{{ _('common.start') }}</button>
           </form>
           <form method="post" action="/dashboard/service" class="inline">
             <input type="hidden" name="unit" value="{{ row[0] }}">
             <input type="hidden" name="action" value="stop">
-            <button type="submit" {% if row[0] in ['delatometry-webui.service', 'mariadb.service', 'mysql.service'] %}disabled title="Use SSH"{% endif %}>stop</button>
+            <button type="submit" {% if row[0] in ['delatometry-webui.service', 'mariadb.service', 'mysql.service'] %}disabled title="{{ _('common.use_ssh') }}"{% endif %}>{{ _('common.stop') }}</button>
           </form>
           <form method="post" action="/dashboard/service" class="inline">
             <input type="hidden" name="unit" value="{{ row[0] }}">
             <input type="hidden" name="action" value="restart">
-            <button type="submit" {% if row[0] == 'delatometry-webui.service' %}disabled title="Use SSH"{% endif %}>restart</button>
+            <button type="submit" {% if row[0] == 'delatometry-webui.service' %}disabled title="{{ _('common.use_ssh') }}"{% endif %}>{{ _('common.restart') }}</button>
           </form>
           {% else %}—{% endif %}
         </td>
@@ -69,9 +69,9 @@
 </section>
 
 <section class="card" id="dash-disk">
-  <h2>Disk</h2>
+  <h2>{{ _('dashboard.disk') }}</h2>
   <table class="data">
-    <thead><tr><th>Disk</th><th>Utilization %</th><th>Inodes free %</th><th>Free GB</th></tr></thead>
+    <thead><tr><th>{{ _('dashboard.disk') }}</th><th>{{ _('dashboard.disk_util') }}</th><th>{{ _('dashboard.disk_inodes') }}</th><th>{{ _('dashboard.disk_free_gb') }}</th></tr></thead>
     <tbody id="dash-disk-tbody">
     {% for row in disks %}
       <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
@@ -81,9 +81,9 @@
 </section>
 
 <section class="card" id="dash-uart">
-  <h2>UART ports</h2>
+  <h2>{{ _('dashboard.uart') }}</h2>
   <table class="data">
-    <thead><tr><th>Role</th><th>Port</th><th>Status</th></tr></thead>
+    <thead><tr><th>{{ _('dashboard.uart_role') }}</th><th>{{ _('dashboard.uart_port') }}</th><th>{{ _('common.status') }}</th></tr></thead>
     <tbody id="dash-uart-tbody">
     {% for row in uart %}
       <tr><td>{{ row[0] }}</td><td><code>{{ row[1] }}</code></td><td>{{ row[2] }}</td></tr>
@@ -93,9 +93,9 @@
 </section>
 
 <section class="card" id="dash-network">
-  <h2>Network interfaces</h2>
+  <h2>{{ _('dashboard.network') }}</h2>
   <table class="data">
-    <thead><tr><th>Interface</th><th>State</th><th>MAC</th><th>IPv4</th></tr></thead>
+    <thead><tr><th>{{ _('dashboard.net_iface') }}</th><th>{{ _('dashboard.net_state') }}</th><th>{{ _('dashboard.net_mac') }}</th><th>{{ _('dashboard.net_ipv4') }}</th></tr></thead>
     <tbody id="dash-network-tbody">
     {% for row in interfaces %}
       <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
@@ -105,7 +105,7 @@
 </section>
 
 <section class="card">
-  <h2>Log</h2>
+  <h2>{{ _('dashboard.log') }}</h2>
   <pre class="log" id="dash-log">{{ log_text }}</pre>
 </section>
 {% endblock %}

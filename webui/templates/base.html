@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ lang_attr }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11,10 +11,14 @@
   <header class="site-header">
     <div class="brand">{{ title }}</div>
     <nav class="main-nav">
-      <a href="/dashboard" class="{% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
-      <a href="/programs" class="{% if active == 'programs' %}active{% endif %}">Programs</a>
-      <a href="/experiment" class="{% if active == 'experiment' %}active{% endif %}">Experiment</a>
-      <a href="/configuration" class="{% if active == 'config' %}active{% endif %}">Configuration</a>
+      <a href="/dashboard" class="{% if active == 'dashboard' %}active{% endif %}">{{ _('nav.dashboard') }}</a>
+      <a href="/programs" class="{% if active == 'programs' %}active{% endif %}">{{ _('nav.programs') }}</a>
+      <a href="/experiment" class="{% if active == 'experiment' %}active{% endif %}">{{ _('nav.experiment') }}</a>
+      <a href="/configuration" class="{% if active == 'config' %}active{% endif %}">{{ _('nav.configuration') }}</a>
+      <span class="lang-switch" aria-label="Language">
+        <a href="/set-locale/en" class="lang-btn{% if locale == 'en' %} active{% endif %}">{{ _('lang.en') }}</a>
+        <a href="/set-locale/uk" class="lang-btn{% if locale == 'uk' %} active{% endif %}">{{ _('lang.uk') }}</a>
+      </span>
     </nav>
   </header>
   <main class="page">

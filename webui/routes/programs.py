@@ -6,9 +6,17 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
-from webui.e720_sweep import STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
+from webui.e720_sweep import STANDARD_FREQUENCIES
+from webui.i18n import translate_e720_modes, translate_validation_result
 from webui.program_steps import parse_step_field_updates
-from webui.temperature_validation import T_MAX_K, T_MIN_K, validate_new_program, validate_temperature_steps
+from webui.render import template_response
+from webui.temperature_validation import (
+    T_MAX_K,
+    T_MIN_K,
+    suggest_next_step,
+    validate_new_program,
+    validate_temperature_steps,
+)
 
 router = APIRouter()
 
@@ -19,7 +27,7 @@ def _tpl(request: Request):
 
 def _e720_choices():
     return {
-        'modes': [(label, key) for key, label in sorted(SWEEP_MODE_LABELS.items())],
+        'modes': translate_e720_modes(),
         'frequencies': [str(f) for f in STANDARD_FREQUENCIES],
     }
 
@@ -28,7 +36,8 @@ def _e720_choices():
 async def programs_list(request: Request, msg: str = Query('')) -> HTMLResponse:
     templates, node = _tpl(request)
     rows = node._programs_table()
-    return templates.TemplateResponse(
+    return template_response(
+        templates,
         request,
         'programs/list.html',
         {'programs': rows, 'message': msg, 'title': node.title},
@@ -40,16 +49,21 @@ async def program_new_form(request: Request, msg: str = Query(''), new: int = Qu
     templates, node = _tpl(request)
     if new:
         node.clear_new_program_draft()
+    meta = node.get_new_program_draft_meta()
     default_step = node.suggest_new_program_step_defaults()
-    return templates.TemplateResponse(
+    return template_response(
+        templates,
         request,
         'programs/new.html',
         {
             'title': node.title,
-            'description': '',
+            'description': meta['description'],
             'steps': node.get_new_program_draft(),
             'message': msg,
             'e720': _e720_choices(),
+            'sweep_mode': meta['sweep_mode'],
+            'enabled_freqs': meta['enabled_freqs'],
+            'range_max': meta['range_max'],
             'default_step': default_step,
             't_limits': {'t_min_k': T_MIN_K, 't_max_k': T_MAX_K},
         },
@@ -60,7 +74,7 @@ async def program_new_form(request: Request, msg: str = Query(''), new: int = Qu
 async def program_new_validate(request: Request) -> JSONResponse:
     _, node = _tpl(request)
     form = await request.form()
-    node.update_new_program_draft_from_form(parse_step_field_updates(form))
+    node.sync_new_program_draft_from_form(form)
     draft = node.get_new_program_draft()
     enabled = form.getlist('enabled_freqs') if hasattr(form, 'getlist') else []
     result = validate_new_program(
@@ -70,7 +84,7 @@ async def program_new_validate(request: Request) -> JSONResponse:
         enabled,
         float(form.get('range_max', 10000) or 10000),
     )
-    return JSONResponse(result.to_dict())
+    return JSONResponse(translate_validation_result(result))
 
 
 @router.post('/program-new/steps/add')
@@ -79,8 +93,10 @@ async def program_new_add_step(
     t_start: float = Form(...),
     t_stop: float = Form(...),
     minutes: float = Form(...),
+    description: str = Form(''),
 ) -> RedirectResponse:
     _, node = _tpl(request)
+    node.set_new_program_draft_meta(description=description)
     err = node.add_new_program_draft_step(t_start, t_stop, minutes)
     if err:
         return RedirectResponse(url=f'/program-new?msg={quote(err)}', status_code=303)
@@ -90,6 +106,8 @@ async def program_new_add_step(
 @router.post('/program-new/steps/remove')
 async def program_new_remove_step(request: Request, step_id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
+    form = await request.form()
+    node.sync_new_program_draft_from_form(form)
     node.remove_new_program_draft_step(step_id)
     return RedirectResponse(url='/program-new?msg=Step+removed', status_code=303)
 
@@ -104,7 +122,7 @@ async def program_new_create(
 ) -> RedirectResponse:
     _, node = _tpl(request)
     form = await request.form()
-    node.update_new_program_draft_from_form(parse_step_field_updates(form))
+    node.sync_new_program_draft_from_form(form)
     msg = node.ui_program_create_from_draft(description, sweep_mode, enabled_freqs, range_max)
     if not msg.startswith('Program '):
         return RedirectResponse(url=f'/program-new?msg={quote(msg)}', status_code=303)
@@ -115,7 +133,8 @@ async def program_new_create(
 async def program_view(request: Request, id: int = Query(0)) -> HTMLResponse:
     templates, node = _tpl(request)
     fields = node.program_view_fields(id)
-    return templates.TemplateResponse(
+    return template_response(
+        templates,
         request,
         'programs/view.html',
         {'title': node.title, 'program_id': id, **fields},
@@ -127,7 +146,9 @@ async def program_edit_form(request: Request, id: int = Query(0), msg: str = Que
     templates, node = _tpl(request)
     node.ui_programs_set_nav(id)
     fields = node.program_edit_fields(id)
-    return templates.TemplateResponse(
+    default_step = suggest_next_step(fields.get('steps', []))
+    return template_response(
+        templates,
         request,
         'programs/edit.html',
         {
@@ -135,6 +156,8 @@ async def program_edit_form(request: Request, id: int = Query(0), msg: str = Que
             'program_id': id,
             'message': msg,
             'e720': _e720_choices(),
+            'default_step': default_step,
+            't_limits': {'t_min_k': T_MIN_K, 't_max_k': T_MAX_K},
             **fields,
         },
     )
@@ -200,8 +223,8 @@ async def program_edit_add_step(
 ) -> RedirectResponse:
     _, node = _tpl(request)
     node.ui_programs_set_nav(id)
-    node.ui_program_edit_add_step(t_start, t_stop, minutes)
-    return RedirectResponse(url=f'/program-edit?id={id}', status_code=303)
+    _, text = node.ui_program_edit_add_step(t_start, t_stop, minutes)
+    return RedirectResponse(url=f'/program-edit?id={id}&msg={quote(text)}', status_code=303)
 
 
 @router.post('/program-edit/steps/remove')

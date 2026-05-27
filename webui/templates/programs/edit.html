@@ -2,88 +2,174 @@
 {% set active = 'programs' %}
 {% block content %}
 <div class="page-head">
-  <h1>Edit program {{ program_id }}</h1>
-  <a href="/programs">← Programs</a>
-  <a href="/program-view?id={{ program_id }}">View</a>
+  <h1>{{ _('program_edit.title', id=program_id) }}</h1>
+  <a href="/programs">{{ _('programs.back') }}</a>
+  <a href="/program-view?id={{ program_id }}">{{ _('programs.view') }}</a>
 </div>
 
 <p class="banner">{{ header }}</p>
 <p class="status-line">{{ run_status }}</p>
 
-<form method="post" action="/program-edit" class="card">
+<form method="post" action="/program-edit" id="program-edit-form" class="program-wizard"
+      data-program-id="{{ program_id }}"
+      data-t-min="{{ t_limits.t_min_k }}" data-t-max="{{ t_limits.t_max_k }}"
+      data-msg-add-invalid="{{ _('program_new.add_step_invalid') }}"
+      data-msg-add-fail="{{ _('program_new.add_step_fail') }}"
+      data-msg-remove-confirm="{{ _('program_edit.remove_confirm', id='{id}') }}">
   <input type="hidden" name="id" value="{{ program_id }}">
 
-  <h2>Temperature steps</h2>
-  <p class="muted">Edit a cell and click outside the row — the step saves automatically. Use <strong>Save program</strong> for description and E7-20 settings.</p>
-  <table class="data steps-edit-table" data-mode="edit" data-program-id="{{ program_id }}">
-    <thead><tr><th>#</th><th>t_start K</th><th>t_stop K</th><th>minutes</th><th></th></tr></thead>
-    <tbody>
-    {% for row in steps %}
-      <tr data-step-id="{{ row[0] }}">
-        <td>{{ row[0] }}</td>
-        <td><input type="number" name="step_{{ row[0] }}_t_start" value="{{ row[1] }}" step="0.1" class="step-input" data-field="t_start"></td>
-        <td><input type="number" name="step_{{ row[0] }}_t_stop" value="{{ row[2] }}" step="0.1" class="step-input" data-field="t_stop"></td>
-        <td><input type="number" name="step_{{ row[0] }}_minutes" value="{{ row[3] }}" step="0.1" class="step-input" data-field="minutes"></td>
-        <td class="actions">
-          <button type="submit"
-                  formaction="/program-edit/steps/remove"
-                  formmethod="post"
-                  class="danger"
-                  onclick="return confirm('Remove step {{ row[0] }}?');"
-                  name="step_id"
-                  value="{{ row[0] }}">Remove</button>
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-
-  <h2>Program</h2>
-  <label>Description <input type="text" name="description" value="{{ description }}" class="wide"></label>
-
-  <h2>E7-20 sweep</h2>
-  <label>Mode
-    <select name="sweep_mode">
-      {% for label, key in e720.modes %}
-      <option value="{{ key }}" {% if key == sweep_mode %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <fieldset>
-    <legend>Enabled frequencies (Hz)</legend>
-    <div class="freq-grid">
-      {% for f in e720.frequencies %}
-      <label><input type="checkbox" name="enabled_freqs" value="{{ f }}" {% if f in enabled_freqs %}checked{% endif %}> {{ f }}</label>
-      {% endfor %}
+  <section class="card program-wizard-section" id="section-description">
+    <div class="section-head">
+      <h2>{{ _('program_edit.section_description') }}</h2>
+      {% if status %}<span class="section-badge pending">{{ status }}</span>{% endif %}
     </div>
-  </fieldset>
-  <label>Range max Hz <input type="number" name="range_max" value="{{ range_max }}" step="1"></label>
+    <p class="muted">{{ _('program_edit.desc_hint') }}</p>
+    <label class="field-block">
+      {{ _('program_new.description') }}
+      <input type="text"
+             id="program-description"
+             name="description"
+             value="{{ description }}"
+             class="wide"
+             maxlength="500"
+             autocomplete="off"
+             placeholder="e.g. Calibration run March 2026">
+    </label>
+  </section>
 
-  <button type="submit" class="btn primary">Save program</button>
+  <section class="card program-wizard-section" id="section-steps">
+    <div class="section-head">
+      <h2>{{ _('program_edit.section_steps') }}</h2>
+    </div>
+    <p class="muted">
+      {{ _('program_new.steps_range', t_min=t_limits.t_min_k|int, t_max=t_limits.t_max_k|int) }}
+      {{ _('program_new.steps_chain') }}
+    </p>
+
+    <div class="steps-blocks-shell">
+      <div class="steps-blocks">
+        <div class="wizard-inner-block steps-list-block" id="steps-list-block">
+          <div class="inner-block-head">
+            <h3>{{ _('program_new.step_list') }}</h3>
+            <span class="inner-block-hint muted">{{ _('program_new.step_list_hint') }}</span>
+          </div>
+          <div class="inner-block-body inner-block-body--flush">
+            <table class="data steps-edit-table" data-mode="edit" data-program-id="{{ program_id }}" id="steps-table">
+              <thead>
+                <tr><th>{{ _('program_new.col_step') }}</th><th>{{ _('program_new.col_t_start') }}</th><th>{{ _('program_new.col_t_stop') }}</th><th>{{ _('program_new.col_minutes') }}</th><th></th></tr>
+              </thead>
+              <tbody>
+              {% for row in steps %}
+                <tr data-step-id="{{ row[0] }}">
+                  <td>{{ row[0] }}</td>
+                  <td>
+                    <input type="number" name="step_{{ row[0] }}_t_start" value="{{ row[1] }}" step="0.1"
+                           min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                           class="step-input" data-field="t_start">
+                  </td>
+                  <td>
+                    <input type="number" name="step_{{ row[0] }}_t_stop" value="{{ row[2] }}" step="0.1"
+                           min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                           class="step-input" data-field="t_stop">
+                  </td>
+                  <td>
+                    <input type="number" name="step_{{ row[0] }}_minutes" value="{{ row[3] }}" step="0.1"
+                           min="0.1" class="step-input" data-field="minutes">
+                  </td>
+                  <td class="actions">
+                    <button type="submit"
+                            formaction="/program-edit/steps/remove"
+                            formmethod="post"
+                            class="danger"
+                            onclick="return confirm('{{ _('program_edit.remove_confirm', id=row[0]) }}');"
+                            name="step_id"
+                            value="{{ row[0] }}">{{ _('common.remove') }}</button>
+                    <span class="step-save-status" aria-live="polite"></span>
+                  </td>
+                </tr>
+              {% else %}
+                <tr class="steps-empty-row">
+                  <td colspan="5">{{ _('program_new.no_steps') }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="wizard-inner-block add-step-block" id="section-add-step">
+          <div class="inner-block-head">
+            <h3>{{ _('program_new.add_step') }}</h3>
+          </div>
+          <div class="inner-block-body">
+            <div class="form-row add-step-form" id="add-step-fields">
+              <label>{{ _('program_new.col_t_start') }}
+                <input type="number" id="add-t-start" step="0.1"
+                       min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                       value="{{ default_step[0] }}">
+              </label>
+              <label>{{ _('program_new.col_t_stop') }}
+                <input type="number" id="add-t-stop" step="0.1"
+                       min="{{ t_limits.t_min_k }}" max="{{ t_limits.t_max_k }}"
+                       value="{{ default_step[1] }}">
+              </label>
+              <label>{{ _('program_new.col_minutes') }}
+                <input type="number" id="add-minutes" step="0.1" min="0.1" value="{{ default_step[2] }}">
+              </label>
+              <button type="button" class="btn primary" id="add-step-btn">{{ _('program_new.add_step_btn') }}</button>
+            </div>
+            <p class="muted add-step-hint" id="add-step-hint" style="display:none"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card program-wizard-section" id="section-e720">
+    <div class="section-head">
+      <h2>{{ _('program_edit.section_e720') }}</h2>
+    </div>
+    <label>{{ _('program_new.e720_mode') }}
+      <select name="sweep_mode" id="sweep-mode">
+        {% for label, key in e720.modes %}
+        <option value="{{ key }}"{% if key == sweep_mode %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <fieldset>
+      <legend>{{ _('program_new.e720_freqs') }}</legend>
+      <div class="freq-grid" id="enabled-freqs">
+        {% for f in e720.frequencies %}
+        <label><input type="checkbox" name="enabled_freqs" value="{{ f }}"{% if f in enabled_freqs %} checked{% endif %}> {{ f }}</label>
+        {% endfor %}
+      </div>
+    </fieldset>
+    <label>{{ _('program_new.e720_range_max') }}
+      <input type="number" name="range_max" id="range-max" value="{{ range_max }}" step="1" min="1">
+    </label>
+  </section>
+
+  <div class="wizard-actions">
+    <button type="submit" class="btn primary">{{ _('program_edit.save') }}</button>
+    <p class="muted">{{ _('program_edit.save_hint') }}</p>
+  </div>
 </form>
 
-<section class="card">
-  <h3>Add step</h3>
-  <form method="post" action="/program-edit/steps/add" class="form-row">
-    <input type="hidden" name="id" value="{{ program_id }}">
-    <label>t_start <input type="number" name="t_start" step="0.1" value="200"></label>
-    <label>t_stop <input type="number" name="t_stop" step="0.1" value="300"></label>
-    <label>minutes <input type="number" name="minutes" step="0.1" value="15"></label>
-    <button type="submit">Add step</button>
-  </form>
+<section class="card program-run-actions">
+  <h3>{{ _('program_edit.run') }}</h3>
+  <div class="form-row">
+    <form method="post" action="/program-edit/run" class="inline">
+      <input type="hidden" name="id" value="{{ program_id }}">
+      <button type="submit" class="btn primary">{{ _('program_edit.start') }}</button>
+    </form>
+    <form method="post" action="/program-edit/stop" class="inline">
+      <input type="hidden" name="id" value="{{ program_id }}">
+      <button type="submit">{{ _('common.stop') }}</button>
+    </form>
+  </div>
 </section>
-
-<div class="form-row card">
-  <form method="post" action="/program-edit/run" class="inline">
-    <input type="hidden" name="id" value="{{ program_id }}">
-    <button type="submit" class="btn primary">Start program</button>
-  </form>
-  <form method="post" action="/program-edit/stop" class="inline">
-    <input type="hidden" name="id" value="{{ program_id }}">
-    <button type="submit">Stop</button>
-  </form>
-</div>
 {% endblock %}
 {% block scripts %}
 <script src="/static/program_steps.js" defer></script>
+<script src="/static/program_edit.js" defer></script>
 {% endblock %}

@@ -17,6 +17,7 @@ from std_msgs.msg import String, UInt8
 
 from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops
 from webui.param_utils import ros_param_bool
+from webui.program_steps import parse_step_field_updates
 from webui.temperature_validation import suggest_next_step, validate_new_program, validate_temperature_steps
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
@@ -131,6 +132,10 @@ class WebHMINode(Node):
         self._lock = threading.RLock()
         self._programs_nav_program_id = 0
         self._new_program_draft: List[List[Any]] = []
+        self._new_program_description: str = ''
+        self._new_program_sweep_mode: int = 0
+        self._new_program_enabled_freqs: List[str] = ['1000']
+        self._new_program_range_max: float = 10000.0
         self._last_topic_peek: Dict[str, str] = {}
         self._last_wifi_scan: List[List[Any]] = []
         self._last_db_test_msg = ''
@@ -1164,6 +1169,58 @@ class WebHMINode(Node):
     def clear_new_program_draft(self) -> None:
         with self._lock:
             self._new_program_draft = []
+            self._new_program_description = ''
+            self._new_program_sweep_mode = 0
+            self._new_program_enabled_freqs = ['1000']
+            self._new_program_range_max = 10000.0
+
+    def get_new_program_draft_meta(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                'description': self._new_program_description,
+                'sweep_mode': self._new_program_sweep_mode,
+                'enabled_freqs': list(self._new_program_enabled_freqs),
+                'range_max': self._new_program_range_max,
+            }
+
+    def set_new_program_draft_meta(
+        self,
+        description: Optional[str] = None,
+        sweep_mode: Optional[int] = None,
+        enabled_freqs: Optional[List[str]] = None,
+        range_max: Optional[float] = None,
+    ) -> None:
+        with self._lock:
+            if description is not None:
+                self._new_program_description = str(description).strip()
+            if sweep_mode is not None:
+                self._new_program_sweep_mode = int(sweep_mode)
+            if enabled_freqs is not None:
+                self._new_program_enabled_freqs = [str(f) for f in enabled_freqs if str(f).strip()]
+            if range_max is not None:
+                self._new_program_range_max = float(range_max)
+
+    def sync_new_program_draft_from_form(self, form: Any) -> None:
+        """Keep description, steps, and E7-20 draft in sync with the wizard form."""
+        enabled = form.getlist('enabled_freqs') if hasattr(form, 'getlist') else []
+        if not enabled and form.get('enabled_freqs'):
+            raw = form.get('enabled_freqs')
+            enabled = raw if isinstance(raw, list) else [raw]
+        try:
+            sweep_mode = int(form.get('sweep_mode', 0) or 0)
+        except (TypeError, ValueError):
+            sweep_mode = 0
+        try:
+            range_max = float(form.get('range_max', 10000) or 10000)
+        except (TypeError, ValueError):
+            range_max = 10000.0
+        self.set_new_program_draft_meta(
+            description=str(form.get('description', '') or ''),
+            sweep_mode=sweep_mode,
+            enabled_freqs=list(enabled),
+            range_max=range_max,
+        )
+        self.update_new_program_draft_from_form(parse_step_field_updates(form))
 
     def get_new_program_draft(self) -> List[List[Any]]:
         with self._lock:

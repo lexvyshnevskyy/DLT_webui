@@ -6,6 +6,8 @@ import json
 from fastapi import APIRouter, Form, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from webui.render import template_response
+
 router = APIRouter()
 
 
@@ -16,7 +18,8 @@ def _tpl(request: Request):
 @router.get('/experiment', response_class=HTMLResponse)
 async def experiment_page(request: Request) -> HTMLResponse:
     templates, node = _tpl(request)
-    return templates.TemplateResponse(
+    return template_response(
+        templates,
         request,
         'experiment.html',
         {

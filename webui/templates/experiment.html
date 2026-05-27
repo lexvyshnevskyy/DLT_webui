@@ -4,8 +4,11 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 {% endblock %}
 {% block content %}
-<div id="experiment-live" data-ws="/ws/experiment" hidden></div>
+<div id="experiment-live" data-ws="/ws/experiment" data-label-agenda="{{ _('experiment.agenda_theory') }}" hidden></div>
 <h1>{{ _('experiment.title') }}</h1>
+{% if message %}
+<p class="flash">{{ message }}</p>
+{% endif %}
 
 <section class="card">
   <h2>{{ _('experiment.status') }}</h2>
@@ -43,9 +46,10 @@
 
 <section class="card">
   <h2>{{ _('experiment.manual') }}</h2>
+  <p class="muted">{{ _('experiment.manual_pwm_hint') }}</p>
   <form method="post" action="/experiment/manual" class="form-row">
     <label>{{ _('experiment.target_k') }} <input type="number" name="target_k" step="0.1" value="300"></label>
-    <label><input type="checkbox" name="enabled" value="true"> {{ _('experiment.enable_control') }}</label>
+    <label><input type="checkbox" name="enabled" value="true" checked> {{ _('experiment.enable_control') }}</label>
     <button type="submit">{{ _('common.apply') }}</button>
   </form>
 </section>

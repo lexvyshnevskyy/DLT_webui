@@ -1046,16 +1046,47 @@ class WebHMINode(Node):
         self._finish_active_program('Stopped')
         return f'Program {program_id} stopped.', self._experiment_banner()
 
+    def _current_theoretical_temp_k(self) -> Optional[float]:
+        """Program ramp target or manual/core setpoint for experiment chart agenda."""
+        with self._lock:
+            exp = self._experiment
+            if exp.program_id is not None and exp.steps and exp.step_index < len(exp.steps):
+                step = exp.steps[exp.step_index]
+                if exp.step_started_monotonic is not None:
+                    elapsed = max(0.0, time.monotonic() - float(exp.step_started_monotonic))
+                    return float(ExperimentRunner.interpolate_target(step, elapsed))
+                return float(step.t_start)
+            core = dict(self._last_core_snapshot.get('temperature_control') or {})
+            if core.get('enabled'):
+                return float(core.get('target_k', 0))
+        return None
+
     def ui_manual_target(self, target_k: float, enabled: bool) -> str:
         if not self._core_available():
-            return json.dumps({'error': self._core_unavailable_message()}, indent=2)
+            return self._core_unavailable_message()
+        tc_payload: Dict[str, Any] = {
+            'enabled': bool(enabled),
+            'target_k': float(target_k),
+        }
+        if enabled:
+            tc_payload['reset_integral'] = True
         try:
-            response = self._core_query({
-                'temperature_control': {'enabled': bool(enabled), 'target_k': float(target_k)},
-            })
-            return json.dumps(response.get('temperature_control') or {}, indent=2)
+            response = self._core_query({'temperature_control': tc_payload})
+            if str(response.get('result', '')).lower() in ('false', 'error'):
+                return str(response.get('error', 'Core rejected temperature control'))
+            tc = response.get('temperature_control')
+            if enabled and not tc:
+                return (
+                    'Heater control did not start. Enable PWM in Configuration → Core '
+                    '(PWM control + restart delatometry-core.service), and ensure LTM data is live.'
+                )
+            if enabled:
+                self._log(f'Manual control ON, target {float(target_k):.2f} K')
+                return f'Manual control started — target {float(target_k):.2f} K (PWM both channels).'
+            self._log('Manual control OFF')
+            return 'Manual control disabled.'
         except Exception as exc:
-            return json.dumps({'error': str(exc)}, indent=2)
+            return f'ERROR: {exc}'
 
     def ui_export_program(self, program_id: float, limit: float, clear_first: bool) -> Tuple[Optional[str], str]:
         if not self._db_available():
@@ -1197,6 +1228,7 @@ class WebHMINode(Node):
         control_temp = None
         if control and self._is_ltm_temperature(control):
             control_temp = float(control['value'])
+        theoretical_temp = self._current_theoretical_temp_k()
         return {
             'banner': self._experiment_banner(),
             'ltm_summary': self._ltm_temperature_summary(),
@@ -1207,6 +1239,9 @@ class WebHMINode(Node):
             'e720_stream': e720_lines,
             'core_json': core,
             'control_temp': control_temp,
+            'theoretical_temp': theoretical_temp,
+            'control_enabled': bool(core.get('enabled')),
+            'heater_output': core.get('heater_output'),
         }
 
     def clear_new_program_draft(self) -> None:

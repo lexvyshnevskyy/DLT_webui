@@ -4,22 +4,35 @@
   const maxPoints = 120;
   const labels = [];
   const controlData = [];
+  const agendaData = [];
   let chart = null;
 
   function initChart() {
     const canvas = document.getElementById('temp-chart');
     if (!canvas || typeof Chart === 'undefined') return;
+    const agendaLabel =
+      (root && root.dataset.labelAgenda) || 'Agenda (theory)';
     chart = new Chart(canvas, {
       type: 'line',
       data: {
         labels,
-        datasets: [{
-          label: 'Control temp',
-          data: controlData,
-          borderColor: '#3d8bfd',
-          tension: 0.15,
-          pointRadius: 0,
-        }],
+        datasets: [
+          {
+            label: 'Control temp',
+            data: controlData,
+            borderColor: '#3d8bfd',
+            tension: 0.15,
+            pointRadius: 0,
+          },
+          {
+            label: agendaLabel,
+            data: agendaData,
+            borderColor: '#e55353',
+            borderDash: [6, 4],
+            tension: 0.15,
+            pointRadius: 0,
+          },
+        ],
       },
       options: {
         animation: false,
@@ -32,13 +45,23 @@
     });
   }
 
-  function pushTemp(value) {
+  function pushTemps(controlValue, agendaValue) {
     const t = new Date().toLocaleTimeString();
     labels.push(t);
-    controlData.push(value);
+    if (typeof controlValue === 'number' && !Number.isNaN(controlValue)) {
+      controlData.push(controlValue);
+    } else {
+      controlData.push(null);
+    }
+    if (typeof agendaValue === 'number' && !Number.isNaN(agendaValue)) {
+      agendaData.push(agendaValue);
+    } else {
+      agendaData.push(null);
+    }
     if (labels.length > maxPoints) {
       labels.shift();
       controlData.shift();
+      agendaData.shift();
     }
     if (chart) chart.update('none');
   }
@@ -77,8 +100,16 @@
     const e720Body = document.querySelector('#e720-table tbody');
     if (e720Body && data.e720_row) fillTable(e720Body, [data.e720_row], 9);
 
-    if (typeof data.control_temp === 'number' && !Number.isNaN(data.control_temp)) {
-      pushTemp(data.control_temp);
+    const controlTemp =
+      typeof data.control_temp === 'number' && !Number.isNaN(data.control_temp)
+        ? data.control_temp
+        : null;
+    const theoryTemp =
+      typeof data.theoretical_temp === 'number' && !Number.isNaN(data.theoretical_temp)
+        ? data.theoretical_temp
+        : null;
+    if (controlTemp !== null || theoryTemp !== null) {
+      pushTemps(controlTemp, theoryTemp);
     }
   }
 

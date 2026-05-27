@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import quote
 
-from fastapi import APIRouter, Form, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Form, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from webui.render import template_response
@@ -16,7 +17,7 @@ def _tpl(request: Request):
 
 
 @router.get('/experiment', response_class=HTMLResponse)
-async def experiment_page(request: Request) -> HTMLResponse:
+async def experiment_page(request: Request, msg: str = Query('')) -> HTMLResponse:
     templates, node = _tpl(request)
     return template_response(
         templates,
@@ -25,6 +26,7 @@ async def experiment_page(request: Request) -> HTMLResponse:
         {
             'title': node.title,
             'refresh_sec': node.status_refresh_period_sec,
+            'message': msg,
         },
     )
 
@@ -37,8 +39,8 @@ async def experiment_manual(
 ) -> RedirectResponse:
     _, node = _tpl(request)
     manual_on = enabled.lower() in ('true', '1', 'on', 'yes')
-    node.ui_manual_target(target_k, manual_on)
-    return RedirectResponse(url='/experiment', status_code=303)
+    result_msg = node.ui_manual_target(target_k, manual_on)
+    return RedirectResponse(url=f'/experiment?msg={quote(result_msg)}', status_code=303)
 
 
 @router.websocket('/ws/experiment')

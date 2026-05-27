@@ -121,6 +121,8 @@
   "experiment.e720_stream": "E7-20 stream",
   "experiment.core_control": "Core temperature control",
   "experiment.manual": "Manual target",
+  "experiment.manual_pwm_hint": "Check Enable control, set target (K), then Apply. Requires Configuration → Core: PWM control enabled and core service restarted. Drives PWM on CH1 and CH2.",
+  "experiment.agenda_theory": "Agenda (theory)",
   "experiment.target_k": "Target K",
   "experiment.enable_control": "Enable control",
 

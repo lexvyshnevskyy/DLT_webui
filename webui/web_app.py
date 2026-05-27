@@ -125,6 +125,12 @@ def create_app(node: 'WebHMINode') -> FastAPI:
         name='dashboard_snapshot_api',
     )
     app.add_api_websocket_route('/ws/dashboard', dashboard.dashboard_ws, name='dashboard_ws')
+    app.add_api_route(
+        '/api/experiment/status',
+        experiment.experiment_status_api,
+        methods=['GET'],
+        name='experiment_status_api',
+    )
 
     @app.get('/')
     async def root() -> RedirectResponse:

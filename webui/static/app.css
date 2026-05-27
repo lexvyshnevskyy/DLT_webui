@@ -65,6 +65,7 @@ body {
 .page { max-width: 1200px; margin: 0 auto; padding: 1.25rem; }
 .page-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
 .page-head h1 { margin: 0; flex: 1; }
+.page-head-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 
 .card {
   background: var(--surface);
@@ -75,6 +76,7 @@ body {
 }
 .card h2 { margin-top: 0; font-size: 1.1rem; }
 
+.experiment-status-actions { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
 .vpn-panel { margin: 0.75rem 0; }
 .vpn-form .form-row { flex-wrap: wrap; align-items: flex-end; }
 span.ok { color: var(--ok); }

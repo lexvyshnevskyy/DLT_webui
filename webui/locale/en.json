@@ -71,6 +71,9 @@
   "programs.col_id": "ID",
   "programs.col_created": "Created",
   "programs.col_status": "Status",
+  "program_view.run": "Run program",
+  "program_view.stop": "Stop",
+  "program_view.active_now": "active on device",
 
   "program_new.title": "New program",
   "program_new.section_description": "1. Program description",
@@ -122,6 +125,8 @@
   "experiment.core_control": "Core temperature control",
   "experiment.manual": "Manual target",
   "experiment.manual_pwm_hint": "Check Enable control, set target (K), then Apply. Requires Configuration → Core: PWM control enabled and core service restarted. Drives PWM on CH1 and CH2.",
+  "experiment.stop_run": "Stop program / stabilize",
+  "experiment.stabilize_300k": "Stabilize at 300 K",
   "experiment.agenda_theory": "Agenda (theory)",
   "experiment.target_k": "Target K",
   "experiment.enable_control": "Enable control",

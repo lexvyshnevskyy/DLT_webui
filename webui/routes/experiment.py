@@ -5,7 +5,7 @@ import json
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from webui.render import template_response
 
@@ -29,6 +29,35 @@ async def experiment_page(request: Request, msg: str = Query('')) -> HTMLRespons
             'message': msg,
         },
     )
+
+
+@router.get('/experiment/status')
+async def experiment_status(request: Request) -> JSONResponse:
+    _, node = _tpl(request)
+    return JSONResponse(node.get_experiment_status())
+
+
+@router.get('/api/experiment/status')
+async def experiment_status_api(request: Request) -> JSONResponse:
+    _, node = _tpl(request)
+    return JSONResponse(node.get_experiment_status())
+
+
+@router.post('/experiment/stop')
+async def experiment_stop(request: Request) -> RedirectResponse:
+    _, node = _tpl(request)
+    _, result_msg = node.ui_stop_program()
+    return RedirectResponse(url=f'/experiment?msg={quote(result_msg)}', status_code=303)
+
+
+@router.post('/experiment/stabilize')
+async def experiment_stabilize(
+    request: Request,
+    target_k: float = Form(300.0),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    result_msg = node.ui_manual_target(float(target_k), True)
+    return RedirectResponse(url=f'/experiment?msg={quote(result_msg)}', status_code=303)
 
 
 @router.post('/experiment/manual')

@@ -21,7 +21,13 @@ from webui.program_steps import parse_step_field_updates
 from webui.temperature_validation import suggest_next_step, validate_new_program, validate_temperature_steps
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
-from webui.experiment_runner import ExperimentRunner, ExperimentState, ProgramStep
+from webui.experiment_runner import (
+    ExperimentRunner,
+    ExperimentState,
+    ProgramStep,
+    experiment_timing,
+    total_program_duration_s,
+)
 from webui.export_data import export_program_archive
 from webui.measurement_log import build_measurement_row, insert_measurement
 from webui.system_config import (
@@ -362,14 +368,62 @@ class WebHMINode(Node):
         except Exception as exc:
             self._log(f'Control loop error: {exc}')
 
-    def _finish_active_program(self, final_status: str) -> None:
-        program_id = self._experiment.program_id
-        if program_id is None:
+    def _halt_temperature_control(self, reason: str = '') -> None:
+        """Stop PI / PWM stabilize mode on core."""
+        if not self._core_available():
             return
         try:
             self._core_query({'temperature_control': {'enabled': False}})
+            if reason:
+                self._log(f'Temperature control stopped ({reason})')
         except Exception as exc:
             self._log(f'Failed to disable control: {exc}')
+
+    def _mark_programs_stopped_in_db(self, except_program_id: Optional[int] = None) -> List[int]:
+        """Set Status=Stopped for every program marked Running in the database."""
+        stopped: List[int] = []
+        if not self._db_available():
+            return stopped
+        try:
+            response = self._db_query({'cmd': 'program_all_list'})
+            if response.get('result') != 'Ok':
+                return stopped
+            for row in response.get('row', []):
+                if len(row) < 3:
+                    continue
+                pid = int(row[0])
+                status = str(row[2] or '').strip()
+                if status.lower() != 'running':
+                    continue
+                if except_program_id is not None and pid == int(except_program_id):
+                    continue
+                self._db_query({'cmd': 'program_update_status', 'id': pid, 'status': 'Stopped'})
+                stopped.append(pid)
+        except Exception as exc:
+            self._log(f'Failed to stop running programs in DB: {exc}')
+        return stopped
+
+    def _stop_prior_experiment(self, new_program_id: int, reason: str) -> None:
+        """Stop in-memory experiment, DB running rows, and core stabilize before a new run."""
+        with self._lock:
+            previous_id = self._experiment.program_id
+        if previous_id is not None and int(previous_id) != int(new_program_id):
+            self._finish_active_program('Stopped')
+        elif previous_id is not None:
+            self._halt_temperature_control('restarting program')
+        else:
+            self._halt_temperature_control(reason)
+
+        stopped_ids = self._mark_programs_stopped_in_db(except_program_id=new_program_id)
+        if stopped_ids:
+            self._log(f'Marked Stopped in DB: programs {stopped_ids}')
+
+    def _finish_active_program(self, final_status: str) -> None:
+        program_id = self._experiment.program_id
+        if program_id is None:
+            self._halt_temperature_control('no active program')
+            return
+        self._halt_temperature_control('program ended')
         try:
             self._db_query({'cmd': 'program_update_status', 'id': program_id, 'status': final_status})
         except Exception as exc:
@@ -1010,28 +1064,77 @@ class WebHMINode(Node):
             steps = self._get_program_steps(program_id_int)
             if not steps:
                 return f'Program {program_id_int} has no steps.', self._experiment_banner()
-            if self._experiment.program_id is not None:
-                return 'Another program is already running.', self._experiment_banner()
+            self._stop_prior_experiment(program_id_int, 'starting new program')
             self._load_e720_config_for_program(program_id_int)
             first_target_k = float(steps[0].t_start)
             self._core_query({
                 'temperature_control': {'enabled': True, 'target_k': first_target_k, 'reset_integral': True},
             })
             self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Running'})
+            now = time.monotonic()
             self._experiment = ExperimentState(
                 program_id=program_id_int,
                 steps=steps,
                 step_index=0,
                 step_started_monotonic=None,
+                started_monotonic=now,
                 status='Running',
                 last_target_k=first_target_k,
             )
             self._sweep.reset()
             self._last_measurement_log_monotonic = 0.0
-            self._log(f'Started program {program_id_int} ({len(steps)} steps)')
-            return f'Program {program_id_int} started.', self._experiment_banner()
+            total_min = total_program_duration_s(steps) / 60.0
+            self._log(f'Started program {program_id_int} ({len(steps)} steps, ~{total_min:.1f} min)')
+            return f'Program {program_id_int} started (status Running).', self._experiment_banner()
         except Exception as exc:
             return f'ERROR: {exc}', self._experiment_banner()
+
+    def ui_stop_program_by_id(self, program_id: float) -> Tuple[str, str]:
+        program_id_int = int(program_id)
+        with self._lock:
+            active = self._experiment.program_id
+        if active is not None and int(active) == program_id_int:
+            self._finish_active_program('Stopped')
+            return f'Program {program_id_int} stopped.', self._experiment_banner()
+        if self._db_available():
+            self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Stopped'})
+        self._halt_temperature_control('stop requested from program view')
+        return f'Program {program_id_int} marked Stopped.', self._experiment_banner()
+
+    def get_experiment_status(self) -> Dict[str, Any]:
+        with self._lock:
+            exp = self._experiment
+            exp_copy = ExperimentState(
+                program_id=exp.program_id,
+                steps=list(exp.steps),
+                step_index=exp.step_index,
+                step_started_monotonic=exp.step_started_monotonic,
+                started_monotonic=exp.started_monotonic,
+                status=exp.status,
+                last_target_k=exp.last_target_k,
+            )
+            core = dict(self._last_core_snapshot.get('temperature_control') or {})
+        timing = experiment_timing(exp_copy)
+        mode = 'idle'
+        if exp_copy.program_id is not None:
+            mode = 'program_running'
+        elif core.get('enabled'):
+            mode = 'stabilize'
+
+        return {
+            'mode': mode,
+            'banner': self._experiment_banner(),
+            'program_id': exp_copy.program_id,
+            'program_status': 'Running' if exp_copy.program_id is not None else None,
+            'timing': timing,
+            'core': {
+                'enabled': bool(core.get('enabled')),
+                'target_k': core.get('target_k'),
+                'reason': core.get('reason'),
+                'heater_output': core.get('heater_output'),
+            },
+            'theoretical_temp_k': self._current_theoretical_temp_k(),
+        }
 
     def ui_stop_program(self) -> Tuple[str, str]:
         if not self._core_available() and self._experiment.program_id is not None:
@@ -1064,6 +1167,11 @@ class WebHMINode(Node):
     def ui_manual_target(self, target_k: float, enabled: bool) -> str:
         if not self._core_available():
             return self._core_unavailable_message()
+        if enabled:
+            with self._lock:
+                if self._experiment.program_id is not None:
+                    self._finish_active_program('Stopped')
+            self._mark_programs_stopped_in_db()
         tc_payload: Dict[str, Any] = {
             'enabled': bool(enabled),
             'target_k': float(target_k),
@@ -1229,8 +1337,11 @@ class WebHMINode(Node):
         if control and self._is_ltm_temperature(control):
             control_temp = float(control['value'])
         theoretical_temp = self._current_theoretical_temp_k()
+        status = self.get_experiment_status()
         return {
-            'banner': self._experiment_banner(),
+            'banner': status['banner'],
+            'experiment_mode': status['mode'],
+            'timing': status['timing'],
             'ltm_summary': self._ltm_temperature_summary(),
             'measurements': self._measurements_table(),
             'ltm_stream': ltm_lines,
@@ -1482,6 +1593,10 @@ class WebHMINode(Node):
                 'e720_json': '{}',
                 'stats_json': '{}',
                 'message': 'Select a program first.',
+                'db_status': '',
+                'is_running_here': False,
+                'can_run': False,
+                'can_stop': False,
             }
         try:
             detail = self._db_query({'cmd': 'get_program_detail', 'id': pid})
@@ -1492,6 +1607,10 @@ class WebHMINode(Node):
                     'e720_json': '{}',
                     'stats_json': '{}',
                     'message': detail.get('error', 'not found'),
+                    'db_status': '',
+                    'is_running_here': False,
+                    'can_run': False,
+                    'can_stop': False,
                 }
             row = detail['row']
             steps = [[s['step_id'], s['t_start'], s['t_stop'], s['minutes']] for s in row.get('steps', [])]
@@ -1504,12 +1623,20 @@ class WebHMINode(Node):
                 f"- **Temperature steps:** {len(steps)}\n"
             )
             stats = row.get('measurement_stats') or {}
+            db_status = str(row.get('status') or 'New')
+            with self._lock:
+                active_id = self._experiment.program_id
+            is_running_here = active_id is not None and int(active_id) == pid
             return {
                 'summary': summary,
                 'steps': steps,
                 'e720_json': json.dumps(row.get('e720') or {}, indent=2, default=str),
                 'stats_json': json.dumps(stats, indent=2, default=str),
                 'message': f'Loaded program {pid}.',
+                'db_status': db_status,
+                'is_running_here': is_running_here,
+                'can_run': len(steps) > 0 and not is_running_here,
+                'can_stop': is_running_here or db_status.lower() == 'running',
             }
         except Exception as exc:
             return {
@@ -1518,6 +1645,10 @@ class WebHMINode(Node):
                 'e720_json': '{}',
                 'stats_json': '{}',
                 'message': f'ERROR: {exc}',
+                'db_status': '',
+                'is_running_here': False,
+                'can_run': False,
+                'can_stop': False,
             }
 
     def ui_program_create_save_new_page(

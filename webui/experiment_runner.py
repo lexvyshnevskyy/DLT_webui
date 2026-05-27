@@ -19,8 +19,62 @@ class ExperimentState:
     steps: List[ProgramStep] = field(default_factory=list)
     step_index: int = 0
     step_started_monotonic: Optional[float] = None
+    started_monotonic: Optional[float] = None
     status: str = 'Idle'
     last_target_k: Optional[float] = None
+
+
+def total_program_duration_s(steps: List[ProgramStep]) -> float:
+    return sum(max(0.0, float(s.minutes) * 60.0) for s in steps)
+
+
+def format_duration_hms(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    total_sec = int(seconds)
+    hours, rem = divmod(total_sec, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f'{hours}:{minutes:02d}:{secs:02d}'
+    return f'{minutes}:{secs:02d}'
+
+
+def experiment_timing(state: ExperimentState) -> Dict[str, Any]:
+    if state.program_id is None or not state.steps:
+        return {
+            'active': False,
+            'elapsed_s': 0.0,
+            'remaining_s': 0.0,
+            'total_s': 0.0,
+            'elapsed_text': '0:00',
+            'remaining_text': '0:00',
+            'total_text': '0:00',
+            'progress_percent': 0.0,
+        }
+
+    total_s = total_program_duration_s(state.steps)
+    completed_s = sum(
+        max(0.0, float(s.minutes) * 60.0) for s in state.steps[: max(0, state.step_index)]
+    )
+    step_elapsed_s = 0.0
+    if state.step_started_monotonic is not None:
+        step_elapsed_s = max(0.0, time.monotonic() - float(state.step_started_monotonic))
+    elapsed_s = completed_s + step_elapsed_s
+    remaining_s = max(0.0, total_s - elapsed_s)
+    progress = (elapsed_s / total_s * 100.0) if total_s > 0 else 0.0
+
+    return {
+        'active': True,
+        'program_id': state.program_id,
+        'step_index': state.step_index + 1,
+        'step_count': len(state.steps),
+        'elapsed_s': round(elapsed_s, 1),
+        'remaining_s': round(remaining_s, 1),
+        'total_s': round(total_s, 1),
+        'elapsed_text': format_duration_hms(elapsed_s),
+        'remaining_text': format_duration_hms(remaining_s),
+        'total_text': format_duration_hms(total_s),
+        'progress_percent': round(min(100.0, progress), 1),
+    }
 
 
 class ExperimentRunner:

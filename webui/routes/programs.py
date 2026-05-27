@@ -130,15 +130,29 @@ async def program_new_create(
 
 
 @router.get('/program-view', response_class=HTMLResponse)
-async def program_view(request: Request, id: int = Query(0)) -> HTMLResponse:
+async def program_view(request: Request, id: int = Query(0), msg: str = Query('')) -> HTMLResponse:
     templates, node = _tpl(request)
     fields = node.program_view_fields(id)
     return template_response(
         templates,
         request,
         'programs/view.html',
-        {'title': node.title, 'program_id': id, **fields},
+        {'title': node.title, 'program_id': id, 'message': msg, **fields},
     )
+
+
+@router.post('/program-view/run')
+async def program_view_run(request: Request, id: int = Form(...)) -> RedirectResponse:
+    _, node = _tpl(request)
+    _, banner = node.ui_start_program(float(id))
+    return RedirectResponse(url=f'/program-view?id={id}&msg={quote(banner)}', status_code=303)
+
+
+@router.post('/program-view/stop')
+async def program_view_stop(request: Request, id: int = Form(...)) -> RedirectResponse:
+    _, node = _tpl(request)
+    _, banner = node.ui_stop_program_by_id(float(id))
+    return RedirectResponse(url=f'/program-view?id={id}&msg={quote(banner)}', status_code=303)
 
 
 @router.get('/program-edit', response_class=HTMLResponse)

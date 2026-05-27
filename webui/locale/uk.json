@@ -71,6 +71,9 @@
   "programs.col_id": "ID",
   "programs.col_created": "Створено",
   "programs.col_status": "Статус",
+  "program_view.run": "Запустити програму",
+  "program_view.stop": "Зупинити",
+  "program_view.active_now": "активна на пристрої",
 
   "program_new.title": "Нова програма",
   "program_new.section_description": "1. Опис програми",
@@ -122,6 +125,8 @@
   "experiment.core_control": "Керування температурою Core",
   "experiment.manual": "Ручна ціль",
   "experiment.manual_pwm_hint": "Увімкніть «Керування», задайте ціль (K) і натисніть Застосувати. Потрібно: Налаштування → Core — PWM увімкнено та перезапуск delatometry-core.service. PWM на CH1 і CH2.",
+  "experiment.stop_run": "Зупинити програму / стабілізацію",
+  "experiment.stabilize_300k": "Стабілізація 300 K",
   "experiment.agenda_theory": "Агенда (теорія)",
   "experiment.target_k": "Ціль K",
   "experiment.enable_control": "Увімкнути керування",

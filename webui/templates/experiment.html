@@ -6,13 +6,20 @@
 {% block content %}
 <div id="experiment-live" data-ws="/ws/experiment" data-label-agenda="{{ _('experiment.agenda_theory') }}" hidden></div>
 <h1>{{ _('experiment.title') }}</h1>
-{% if message %}
-<p class="flash">{{ message }}</p>
-{% endif %}
 
 <section class="card">
   <h2>{{ _('experiment.status') }}</h2>
   <p id="exp-banner" class="banner">{{ _('common.connecting') }}</p>
+  <p id="exp-timing" class="muted"></p>
+  <p id="exp-mode" class="muted"></p>
+  <div class="form-row experiment-status-actions">
+    <form method="post" action="/experiment/stop" class="inline">
+      <button type="submit" class="danger">{{ _('experiment.stop_run') }}</button>
+    </form>
+    <form method="post" action="/experiment/stabilize" class="inline">
+      <button type="submit" class="primary">{{ _('experiment.stabilize_300k') }}</button>
+    </form>
+  </div>
 </section>
 
 <section class="grid-2">

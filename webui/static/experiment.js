@@ -83,6 +83,23 @@
     if (!data || data.error) return;
     const banner = document.getElementById('exp-banner');
     if (banner) banner.textContent = data.banner || '';
+    const timingEl = document.getElementById('exp-timing');
+    const modeEl = document.getElementById('exp-mode');
+    const timing = data.timing || {};
+    if (timingEl) {
+      if (timing.active) {
+        timingEl.textContent =
+          `Elapsed ${timing.elapsed_text || '0:00'} / ${timing.total_text || '0:00'} — ` +
+          `${timing.remaining_text || '0:00'} left (step ${timing.step_index || 1}/${timing.step_count || 1})`;
+      } else {
+        timingEl.textContent = '';
+      }
+    }
+    if (modeEl) {
+      const mode = data.experiment_mode || 'idle';
+      const labels = { idle: 'Idle', program_running: 'Program running', stabilize: 'Stabilize (manual)' };
+      modeEl.textContent = labels[mode] ? `Mode: ${labels[mode]}` : '';
+    }
     const ltm = document.getElementById('ltm-summary');
     if (ltm) ltm.textContent = data.ltm_summary || '';
     const ltmStream = document.getElementById('ltm-stream');

@@ -3,11 +3,31 @@
 {% block content %}
 <div class="page-head">
   <h1>Program {{ program_id }}</h1>
-  <a href="/programs">← Programs</a>
-  <a class="btn" href="/program-edit?id={{ program_id }}">Edit</a>
+  <div class="page-head-actions">
+    <a class="btn" href="/programs">← Programs</a>
+    <a class="btn" href="/experiment">← {{ _('nav.experiment') }}</a>
+    <a class="btn" href="/program-edit?id={{ program_id }}">Edit program</a>
+    {% if can_run %}
+    <form method="post" action="/program-view/run" class="inline">
+      <input type="hidden" name="id" value="{{ program_id }}">
+      <button type="submit" class="btn primary">{{ _('program_view.run') }}</button>
+    </form>
+    {% endif %}
+    {% if can_stop %}
+    <form method="post" action="/program-view/stop" class="inline">
+      <input type="hidden" name="id" value="{{ program_id }}">
+      <button type="submit" class="btn danger">{{ _('program_view.stop') }}</button>
+    </form>
+    {% endif %}
+
+  </div>
 </div>
 
 <section class="card">
+  <p><strong>{{ _('common.status') }}:</strong>
+    <span class="{% if db_status|lower == 'running' or is_running_here %}ok{% endif %}">{{ db_status }}</span>
+    {% if is_running_here %}<span class="ok"> ({{ _('program_view.active_now') }})</span>{% endif %}
+  </p>
   <pre class="summary">{{ summary }}</pre>
 </section>
 

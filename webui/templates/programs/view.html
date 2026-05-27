@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set active = 'programs' %}
+{% block content %}
+<div class="page-head">
+  <h1>Program {{ program_id }}</h1>
+  <a href="/programs">← Programs</a>
+  <a class="btn" href="/program-edit?id={{ program_id }}">Edit</a>
+</div>
+
+<section class="card">
+  <pre class="summary">{{ summary }}</pre>
+</section>
+
+<section class="card">
+  <h2>Steps</h2>
+  <table class="data">
+    <thead><tr><th>step_id</th><th>t_start K</th><th>t_stop K</th><th>minutes</th></tr></thead>
+    <tbody>
+    {% for row in steps %}
+      <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
+    {% else %}
+      <tr><td colspan="4">No steps.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>E7-20 config</h2>
+  <pre class="mono">{{ e720_json }}</pre>
+</section>
+
+<section class="card">
+  <h2>Measurement stats</h2>
+  <pre class="mono">{{ stats_json }}</pre>
+</section>
+{% endblock %}

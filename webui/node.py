@@ -8,7 +8,6 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-import gradio as gr
 import rclpy
 from database.srv import Query as DatabaseQuery
 from msgs.msg import Ads, E720, Measurement
@@ -30,7 +29,8 @@ from webui.system_config import (
     write_env_file,
 )
 from webui.ros_message import message_to_dict
-from webui.ui_app import build_ui
+from webui.dataframe_utils import parse_temperature_steps
+from webui.collectors import network_config
 
 CoreQuery = DatabaseQuery
 
@@ -128,6 +128,10 @@ class WebHMINode(Node):
 
         self._lock = threading.RLock()
         self._programs_nav_program_id = 0
+        self._new_program_draft: List[List[Any]] = []
+        self._last_topic_peek: Dict[str, str] = {}
+        self._last_wifi_scan: List[List[Any]] = []
+        self._last_db_test_msg = ''
         self._latest_measurements: Dict[int, Dict[str, Any]] = {}
         self._latest_e720: Optional[E720] = None
         self._latest_ads: Optional[Ads] = None
@@ -499,32 +503,42 @@ class WebHMINode(Node):
             'measurements': measurements,
             'latest_raw_json': raw,
         }
-        return json.dumps(payload, indent=2)
+        text = json.dumps(payload, indent=2)
+        with self._lock:
+            self._last_topic_peek['ltm'] = text
+        return text
 
     def ui_peek_e720_topic(self) -> str:
         with self._lock:
             msg = self._latest_e720
-        return json.dumps(
+        text = json.dumps(
             {'topic': self.measure_topic, 'message': message_to_dict(msg)},
             indent=2,
             default=str,
         )
+        with self._lock:
+            self._last_topic_peek['e720'] = text
+        return text
 
     def ui_peek_ads_topic(self) -> str:
         with self._lock:
             msg = self._latest_ads
         if msg is None:
-            return json.dumps(
+            text = json.dumps(
                 {'topic': self.ads_topic, 'message': None, 'hint': 'No message yet — is the node enabled?'},
                 indent=2,
             )
-        return json.dumps({'topic': self.ads_topic, 'message': message_to_dict(msg)}, indent=2, default=str)
+        else:
+            text = json.dumps({'topic': self.ads_topic, 'message': message_to_dict(msg)}, indent=2, default=str)
+        with self._lock:
+            self._last_topic_peek['ads'] = text
+        return text
 
     def ui_peek_hmi_topic(self) -> str:
         with self._lock:
             e720_msg = self._latest_e720
             ads_msg = self._latest_ads
-        return json.dumps(
+        text = json.dumps(
             {
                 'note': 'HMI consumes these topics (UART is fixed on-board)',
                 'measure_topic': self.measure_topic,
@@ -535,6 +549,9 @@ class WebHMINode(Node):
             indent=2,
             default=str,
         )
+        with self._lock:
+            self._last_topic_peek['hmi'] = text
+        return text
 
     def ui_test_database_connection(
         self,
@@ -546,7 +563,10 @@ class WebHMINode(Node):
     ) -> str:
         ok, msg = db_test.test_database_connection(host, int(port), name, user, password)
         self._log(f'DB test: {msg}')
-        return f'OK: {msg}' if ok else f'FAILED: {msg}'
+        result = f'OK: {msg}' if ok else f'FAILED: {msg}'
+        with self._lock:
+            self._last_db_test_msg = result
+        return result
 
     def ui_tick_network(self) -> List[List[Any]]:
         return network_info.interfaces_table()
@@ -577,7 +597,7 @@ class WebHMINode(Node):
             self._hotspot_status_text(),
         )
 
-    def ui_select_network_interface(self, iface: str) -> Tuple[Any, ...]:
+    def ui_select_network_interface(self, iface: str) -> Tuple[str, str, float, bool, str]:
         iface = str(iface or 'eth0').strip()
         parsed = network_info.parse_primary_ipv4(iface)
         info = network_info.get_interface(iface)
@@ -586,7 +606,7 @@ class WebHMINode(Node):
             self._iface_summary(iface),
             parsed['address'],
             float(parsed['prefix']),
-            gr.update(visible=is_wifi),
+            is_wifi,
             self._hotspot_status_text(iface),
         )
 
@@ -665,49 +685,6 @@ class WebHMINode(Node):
         if ok_r:
             return f'Saved and {msg_r}.'
         return f'Saved ({msg}) but restart failed: {msg_r}'
-
-    def ui_load_configuration(self) -> Tuple[Any, ...]:
-        snap = get_configuration_snapshot(self.delatometry_env_file)
-        ltm = snap['ltm2985']
-        meas = snap['measure_device']
-        db = snap['database']
-        core = snap['core']
-        ads = snap['ads1256']
-        status = f'Loaded {self.delatometry_env_file}' if snap.get('env_readable') else (
-            f'Warning: could not read {self.delatometry_env_file} (using defaults)'
-        )
-        ifaces = network_info.list_manageable_interfaces()
-        default_iface = 'eth0' if 'eth0' in ifaces else (ifaces[0] if ifaces else 'eth0')
-        parsed = network_info.parse_primary_ipv4(default_iface)
-        info = network_info.get_interface(default_iface)
-        is_wifi = bool(info and info.get('kind') == 'wifi')
-        return (
-            status,
-            network_info.interfaces_table(),
-            gr.update(choices=ifaces, value=default_iface),
-            self._iface_summary(default_iface),
-            parsed['address'],
-            float(parsed['prefix']),
-            gr.update(visible=is_wifi),
-            self._hotspot_status_text(default_iface),
-            gr.update(choices=serial_port_choices(ltm['port']), value=ltm['port']),
-            float(ltm['baudrate']),
-            gr.update(choices=serial_port_choices(meas['port']), value=meas['port']),
-            float(meas['speed']),
-            db['host'],
-            float(db['port']),
-            db['name'],
-            db['user'],
-            db['password'],
-            db['auto_init_schema'],
-            gr.update(choices=gpio_pins.bcm_pin_choices(core['pwm_pin_ch1']), value=str(core['pwm_pin_ch1'])),
-            gr.update(choices=gpio_pins.bcm_pin_choices(core['pwm_pin_ch2']), value=str(core['pwm_pin_ch2'])),
-            core['enable_database_client'],
-            core['enable_pwm_controller'],
-            ads['enabled'],
-            ads['simulate'],
-            ads['fallback_to_simulation'],
-        )
 
     def ui_save_ltm2985_config(self, port: str, baudrate: float, restart: bool) -> Tuple[str, str]:
         msg = self._save_env_section(
@@ -810,11 +787,9 @@ class WebHMINode(Node):
         if not unit_name.endswith('.service'):
             unit_name = f'{unit_name}.service'
         action_l = action.strip().lower()
-        if unit_name == 'delatometry-webui.service' and action_l in {'stop', 'restart'}:
-            return (
-                f'Cannot {action_l} delatometry-webui from this page — you are using it. '
-                'Run: sudo systemctl {action_l} delatometry-webui.service'
-            )
+        blocked = systemd_ops.unit_action_blocked(unit_name, action_l)
+        if blocked:
+            return blocked
         result = systemd_ops.control_unit(unit_name, action_l, use_sudo=True)
         message = f'{action} {unit}: {"OK" if result["ok"] else "FAILED"}'
         if result.get('error'):
@@ -1063,6 +1038,8 @@ class WebHMINode(Node):
         if not result.get('ok'):
             return [], result.get('error', 'scan failed')
         rows = result.get('rows', [])
+        with self._lock:
+            self._last_wifi_scan = rows
         return rows, f'Found {len(rows)} network(s).'
 
     def ui_wifi_connect(self, ssid: str, password: str, iface: str) -> str:
@@ -1076,53 +1053,176 @@ class WebHMINode(Node):
         self._log(f'Wi-Fi {ssid} on {iface}: {msg}')
         return msg
 
-    # --- Programs multipage UI ---
-    def ui_programs_set_nav(self, program_id: int, action: str = '') -> None:
+    # --- Web UI context helpers ---
+    def get_dashboard_context(self) -> Dict[str, Any]:
+        (
+            _critical,
+            host_summary,
+            units,
+            disks,
+            uart,
+            interfaces,
+            log_text,
+        ) = self.ui_tick_general()
+        return {
+            'title': self.title,
+            'services': self._critical_services_status(),
+            'host': host_summary,
+            'units': units,
+            'disks': disks,
+            'uart': uart,
+            'interfaces': interfaces,
+            'log_text': log_text,
+            'enable_service_control': self.enable_service_control,
+        }
+
+    def get_configuration_context(self, iface: Optional[str] = None) -> Dict[str, Any]:
+        snap = get_configuration_snapshot(self.delatometry_env_file)
+        ifaces = network_info.list_manageable_interfaces()
+        selected = str(iface or '').strip()
+        if not selected:
+            selected = 'eth0' if 'eth0' in ifaces else (ifaces[0] if ifaces else 'eth0')
+        if selected not in ifaces and ifaces:
+            selected = ifaces[0]
+        net = self._network_iface_context(selected)
+        with self._lock:
+            peek = dict(self._last_topic_peek)
+            peek['db_test'] = self._last_db_test_msg
+            wifi_rows = list(self._last_wifi_scan)
+        core = snap['core']
+        return {
+            'title': self.title,
+            'env_file': self.delatometry_env_file,
+            'status': (
+                f'Loaded {self.delatometry_env_file}'
+                if snap.get('env_readable')
+                else f'Warning: could not read {self.delatometry_env_file} (using defaults)'
+            ),
+            'interfaces': network_info.interfaces_table(),
+            'iface_choices': ifaces,
+            'ltm': snap['ltm2985'],
+            'meas': snap['measure_device'],
+            'db': snap['database'],
+            'core': core,
+            'ads': snap['ads1256'],
+            'ltm_port_choices': serial_port_choices(snap['ltm2985']['port']),
+            'meas_port_choices': serial_port_choices(snap['measure_device']['port']),
+            'pwm_pins': gpio_pins.bcm_pin_choices(core['pwm_pin_ch1']),
+            'hotspot_ssid': network_config.HOTSPOT_SSID,
+            'wifi_networks': wifi_rows,
+            'peek': peek,
+            **net,
+        }
+
+    def _network_iface_context(self, iface: str) -> Dict[str, Any]:
+        summary, address, prefix, is_wifi, hotspot = self.ui_select_network_interface(iface)
+        return {
+            'selected_iface': iface,
+            'iface_info': summary,
+            'net_ip': address,
+            'net_prefix': prefix,
+            'is_wifi': is_wifi,
+            'hotspot_status': hotspot,
+        }
+
+    def get_experiment_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            e720_msg = self._latest_e720
+            ltm_lines = list(self._ltm_stream)
+            e720_lines = list(self._e720_stream)
+            items = dict(self._latest_measurements)
+            core = dict(self._last_core_snapshot.get('temperature_control') or {})
+        e720_data = e720_from_msg(e720_msg)
+        control = items.get(self.ltm_control_channel)
+        control_temp = None
+        if control and self._is_ltm_temperature(control):
+            control_temp = float(control['value'])
+        return {
+            'banner': self._experiment_banner(),
+            'ltm_summary': self._ltm_temperature_summary(),
+            'measurements': self._measurements_table(),
+            'ltm_stream': ltm_lines,
+            'e720_summary': e720_summary_text(e720_data),
+            'e720_row': e720_table_row(e720_data),
+            'e720_stream': e720_lines,
+            'core_json': core,
+            'control_temp': control_temp,
+        }
+
+    def clear_new_program_draft(self) -> None:
+        with self._lock:
+            self._new_program_draft = []
+
+    def get_new_program_draft(self) -> List[List[Any]]:
+        with self._lock:
+            return [list(row) for row in self._new_program_draft]
+
+    def add_new_program_draft_step(self, t_start: float, t_stop: float, minutes: float) -> None:
+        with self._lock:
+            next_id = len(self._new_program_draft) + 1
+            self._new_program_draft.append([next_id, float(t_start), float(t_stop), float(minutes)])
+
+    def remove_new_program_draft_step(self, step_id: int) -> None:
+        with self._lock:
+            idx = int(step_id) - 1
+            if 0 <= idx < len(self._new_program_draft):
+                self._new_program_draft.pop(idx)
+            for i, row in enumerate(self._new_program_draft):
+                row[0] = i + 1
+
+    def ui_program_create_from_draft(
+        self,
+        description: str,
+        mode: int,
+        enabled_freqs: List[str],
+        range_max: float,
+    ) -> str:
+        with self._lock:
+            draft = [list(row) for row in self._new_program_draft]
+        return self.ui_program_create_save_new_page(description, draft, float(mode), enabled_freqs, range_max)
+
+    # --- Programs ---
+    def ui_programs_set_nav(self, program_id: int) -> None:
         with self._lock:
             self._programs_nav_program_id = int(program_id or 0)
-        return None
 
-    def ui_programs_prepare_edit(self, program_id: Any) -> None:
-        self.ui_programs_set_nav(int(float(program_id or 0)), 'edit')
-        return None
+    @staticmethod
+    def _parse_program_id(program_id: Any) -> int:
+        try:
+            return int(float(str(program_id or '').strip() or 0))
+        except (TypeError, ValueError):
+            return 0
 
-    def ui_programs_prepare_show(self, program_id: Any) -> None:
-        self.ui_programs_set_nav(int(float(program_id or 0)), 'view')
-        return None
-
-    def ui_programs_prepare_edit_from_view(self) -> None:
-        return None
-
-    def _programs_dropdown(self, rows: List[List[Any]]) -> Any:
-        choices = [str(int(row[0])) for row in rows if row]
-        return gr.update(choices=choices, value=choices[0] if choices else None)
-
-    def ui_programs_list_refresh(self) -> Tuple[Any, ...]:
+    def ui_programs_list_refresh(self) -> Tuple[List[List[Any]], str]:
         if not self._db_available():
-            return [], self._database_unavailable_message(), gr.update(choices=[], value=None)
+            return [], self._database_unavailable_message()
         rows = self._programs_table()
-        return rows, f'{len(rows)} program(s) in database.', self._programs_dropdown(rows)
+        return rows, f'{len(rows)} program(s) in database.'
 
-    def ui_programs_delete_dialog_show(self, program_id: Any) -> Tuple[Any, str]:
-        pid = int(float(program_id or 0))
-        if pid <= 0:
-            return gr.update(visible=False), 'Select a program first.'
-        return gr.update(visible=True), f'**Program {pid}** and all its measurements will be permanently deleted.'
+    def ui_programs_nav_view(self, program_id: int) -> Tuple[int, str]:
+        pid = int(program_id or 0)
+        self.ui_programs_set_nav(pid)
+        return pid, 'view'
 
-    def ui_programs_delete_confirmed(self, program_id: Any) -> Tuple[Any, ...]:
+    def ui_programs_nav_edit(self, program_id: int) -> Tuple[int, str]:
+        pid = int(program_id or 0)
+        self.ui_programs_set_nav(pid)
+        return pid, 'edit'
+
+    def ui_programs_delete_row(self, program_id: int) -> Tuple[List[List[Any]], str]:
+        return self.ui_programs_action_delete(program_id)
+
+    def ui_programs_export_row(self, program_id: int) -> Tuple[Optional[str], str]:
+        return self.ui_programs_action_export(program_id)
+
+    def ui_programs_action_delete(self, program_id: Any) -> Tuple[List[List[Any]], str]:
+        pid = self._parse_program_id(program_id)
         if not self._db_available():
-            return [], self._database_unavailable_message(), gr.update(), gr.update(visible=False), ''
-        pid = int(float(program_id or 0))
+            return [], self._database_unavailable_message()
         if pid <= 0:
-            return self._programs_table(), 'Select a program first.', gr.update(), gr.update(visible=False), ''
+            return self._programs_table(), 'Select a program first.'
         if self._experiment.program_id == pid:
-            return (
-                self._programs_table(),
-                'Stop the running program before deleting it.',
-                self._programs_dropdown(self._programs_table()),
-                gr.update(visible=False),
-                '',
-            )
+            return self._programs_table(), 'Stop the running program before deleting it.'
         try:
             self._db_query({'cmd': 'measurement_delete_by_program_id', 'program_id': pid})
             response = self._db_query({'cmd': 'program_delete_by_id', 'id': pid})
@@ -1132,14 +1232,14 @@ class WebHMINode(Node):
                 msg = f'Program {pid} and its data were deleted.'
                 self._log(msg)
             rows = self._programs_table()
-            return rows, msg, self._programs_dropdown(rows), gr.update(visible=False), ''
+            return rows, msg
         except Exception as exc:
-            return [], f'ERROR: {exc}', gr.update(), gr.update(visible=False), ''
+            return [], f'ERROR: {exc}'
 
-    def ui_programs_export(self, program_id: Any) -> Tuple[Optional[str], str]:
+    def ui_programs_action_export(self, program_id: Any) -> Tuple[Optional[str], str]:
+        pid = self._parse_program_id(program_id)
         if not self._db_available():
             return None, self._database_unavailable_message()
-        pid = int(float(program_id or 0))
         if pid <= 0:
             return None, 'Select a program to export.'
         try:
@@ -1154,43 +1254,130 @@ class WebHMINode(Node):
         except Exception as exc:
             return None, f'ERROR: {exc}'
 
-    @staticmethod
-    def _parse_steps_dataframe(table: Any) -> List[Dict[str, float]]:
-        rows: List[Dict[str, float]] = []
-        if table is None:
-            return rows
-        for item in list(table):
-            if len(item) < 4:
-                continue
-            rows.append({
-                't_start': float(item[1]),
-                't_stop': float(item[2]),
-                'minutes': float(item[3]),
-            })
-        return rows
+    def program_edit_fields(self, program_id: int) -> Dict[str, Any]:
+        pid = int(program_id or 0)
+        if not self._db_available() or pid <= 0:
+            return {
+                'header': 'Select a program on the list first.',
+                'description': '',
+                'status': '',
+                'steps': [],
+                'sweep_mode': 0,
+                'enabled_freqs': ['1000'],
+                'range_max': 10000.0,
+                'run_status': self._experiment_banner(),
+            }
+        try:
+            detail = self._db_query({'cmd': 'get_program_detail', 'id': pid})
+            if detail.get('result') != 'Ok':
+                return {
+                    'header': f'Program {pid}',
+                    'description': '',
+                    'status': '',
+                    'steps': [],
+                    'sweep_mode': 0,
+                    'enabled_freqs': ['1000'],
+                    'range_max': 10000.0,
+                    'run_status': detail.get('error', 'not found'),
+                }
+            row = detail['row']
+            e720 = row.get('e720') or {}
+            cfg_raw = e720.get('config') if isinstance(e720.get('config'), dict) else {}
+            enabled = [str(int(x)) for x in cfg_raw.get('enabled_frequencies', [1000])]
+            steps = [
+                [s['step_id'], s['t_start'], s['t_stop'], s['minutes']]
+                for s in row.get('steps', [])
+            ]
+            self._load_e720_config_for_program(pid)
+            return {
+                'header': f"Program {row['id']} — {row['datetime']} — status: {row['status']}",
+                'description': str(row.get('description') or ''),
+                'status': str(row.get('status') or ''),
+                'steps': steps,
+                'sweep_mode': int(e720.get('param', 0) or 0),
+                'enabled_freqs': enabled,
+                'range_max': float(cfg_raw.get('range_max_hz', 10000) or 10000),
+                'run_status': self._experiment_banner(),
+            }
+        except Exception as exc:
+            return {
+                'header': f'Program {pid}',
+                'description': '',
+                'status': '',
+                'steps': [],
+                'sweep_mode': 0,
+                'enabled_freqs': ['1000'],
+                'range_max': 10000.0,
+                'run_status': f'ERROR: {exc}',
+            }
 
-    def ui_program_draft_add_step(
-        self,
-        table: Any,
-        t_start: float,
-        t_stop: float,
-        minutes: float,
-    ) -> Tuple[List[List[Any]], str]:
-        rows = [list(r) for r in (table or [])]
-        next_id = len(rows) + 1
-        rows.append([next_id, float(t_start), float(t_stop), float(minutes)])
-        return rows, f'Step {next_id} added to the list (not saved until you create the program).'
+    def program_view_fields(self, program_id: int) -> Dict[str, Any]:
+        pid = int(program_id or 0)
+        if not self._db_available() or pid <= 0:
+            return {
+                'summary': 'Select a program on the list first.',
+                'steps': [],
+                'e720_json': '{}',
+                'stats_json': '{}',
+                'message': 'Select a program first.',
+            }
+        try:
+            detail = self._db_query({'cmd': 'get_program_detail', 'id': pid})
+            if detail.get('result') != 'Ok':
+                return {
+                    'summary': f'Program {pid}',
+                    'steps': [],
+                    'e720_json': '{}',
+                    'stats_json': '{}',
+                    'message': detail.get('error', 'not found'),
+                }
+            row = detail['row']
+            steps = [[s['step_id'], s['t_start'], s['t_stop'], s['minutes']] for s in row.get('steps', [])]
+            desc = (row.get('description') or '').strip() or '_No description_'
+            summary = (
+                f"## Program {row['id']}\n\n"
+                f"- **Created:** {row['datetime']}\n"
+                f"- **Status:** {row['status']}\n"
+                f"- **Description:** {desc}\n"
+                f"- **Temperature steps:** {len(steps)}\n"
+            )
+            stats = row.get('measurement_stats') or {}
+            return {
+                'summary': summary,
+                'steps': steps,
+                'e720_json': json.dumps(row.get('e720') or {}, indent=2, default=str),
+                'stats_json': json.dumps(stats, indent=2, default=str),
+                'message': f'Loaded program {pid}.',
+            }
+        except Exception as exc:
+            return {
+                'summary': f'Program {pid}',
+                'steps': [],
+                'e720_json': '{}',
+                'stats_json': '{}',
+                'message': f'ERROR: {exc}',
+            }
 
-    def ui_program_create_save(
+    def ui_program_create_save_new_page(
         self,
         description: str,
-        steps_table: Any,
+        draft_steps: Any,
         mode: float,
         enabled_freqs: List[str],
         range_max: float,
     ) -> str:
         if not self._db_available():
             return self._database_unavailable_message()
+        steps = []
+        for row in draft_steps or []:
+            if len(row) >= 4:
+                steps.append({
+                    't_start': float(row[1]),
+                    't_stop': float(row[2]),
+                    'minutes': float(row[3]),
+                })
+        if not steps:
+            return 'Add at least one temperature step before creating the program.'
         try:
             created = self._db_query({'cmd': 'new_program'})
             if created.get('result') != 'Ok':
@@ -1206,21 +1393,20 @@ class WebHMINode(Node):
             config = E720SweepConfig(
                 mode=int(mode),
                 enabled_frequencies=freqs,
+                range_min_hz=float(min(freqs)),
                 range_max_hz=float(range_max),
             )
             self._db_query({'cmd': 'set_e720', **config.to_db_payload(program_id)})
-            for step in self._parse_steps_dataframe(steps_table):
+            for step in steps:
                 self._db_query({
                     'cmd': 'program_step_insert',
                     'program_id': program_id,
                     **step,
                 })
-            self.ui_programs_set_nav(program_id, 'edit')
+            self.ui_programs_set_nav(program_id)
+            self.clear_new_program_draft()
             self._log(f'Created program {program_id}')
-            return (
-                f'Program {program_id} created. '
-                f'Open [Edit program](/program-edit) to run it or change settings.'
-            )
+            return f'Program {program_id} created.'
         except Exception as exc:
             return f'ERROR: {exc}'
 
@@ -1228,57 +1414,92 @@ class WebHMINode(Node):
         with self._lock:
             return int(self._programs_nav_program_id)
 
-    def ui_program_edit_load(self) -> Tuple[Any, ...]:
+    @staticmethod
+    def _step_fields_unchanged(current: ProgramStep, fields: Dict[str, float]) -> bool:
+        return (
+            abs(float(current.t_start) - float(fields['t_start'])) < 1e-6
+            and abs(float(current.t_stop) - float(fields['t_stop'])) < 1e-6
+            and abs(float(current.minutes) - float(fields['minutes'])) < 1e-6
+        )
+
+    def ui_program_update_single_step(
+        self,
+        program_id: int,
+        step_id: int,
+        t_start: float,
+        t_stop: float,
+        minutes: float,
+    ) -> Tuple[bool, str]:
         if not self._db_available():
-            empty = 'Database unavailable.'
-            return (empty, '', '', [], gr.update(), [], 10000, empty)
-        program_id = self._active_program_id()
-        if program_id <= 0:
-            return (
-                'No program selected. Go back to [Programs](/programs) and choose **Edit**.',
-                '',
-                '',
-                [],
-                gr.update(value=0),
-                [],
-                10000,
-                'Select a program on the list page first.',
-            )
+            return False, self._database_unavailable_message()
+        program_id = int(program_id)
+        step_id = int(step_id)
+        if program_id <= 0 or step_id <= 0:
+            return False, 'Invalid program or step id.'
         try:
-            detail = self._db_query({'cmd': 'get_program_detail', 'id': program_id})
-            if detail.get('result') != 'Ok':
-                return (
-                    f'Program {program_id}',
-                    '',
-                    '',
-                    [],
-                    gr.update(value=0),
-                    [],
-                    10000,
-                    detail.get('error', 'not found'),
-                )
-            row = detail['row']
-            e720 = row.get('e720') or {}
-            cfg_raw = e720.get('config') if isinstance(e720.get('config'), dict) else {}
-            enabled = [str(int(x)) for x in cfg_raw.get('enabled_frequencies', [1000])]
-            steps = [
-                [s['step_id'], s['t_start'], s['t_stop'], s['minutes']]
-                for s in row.get('steps', [])
-            ]
-            self._load_e720_config_for_program(program_id)
-            header = f"## Program **{row['id']}** — {row['datetime']} — status: **{row['status']}**"
-            return (
-                header,
-                str(row.get('description') or ''),
-                str(row.get('status') or ''),
-                steps,
-                gr.update(value=int(e720.get('param', 0) or 0)),
-                enabled,
-                float(cfg_raw.get('range_max_hz', 10000) or 10000),
-                self._experiment_banner(),
-            )
+            current = {s.step_id: s for s in self._get_program_steps(program_id)}
+            fields = {'t_start': float(t_start), 't_stop': float(t_stop), 'minutes': float(minutes)}
+            cur = current.get(step_id)
+            if cur and self._step_fields_unchanged(cur, fields):
+                return True, f'Step {step_id} unchanged.'
+            response = self._db_query({
+                'cmd': 'program_step_update',
+                'id': step_id,
+                'program_id': program_id,
+                't_start': fields['t_start'],
+                't_stop': fields['t_stop'],
+                'minutes': fields['minutes'],
+            })
+            if response.get('result') != 'Ok':
+                return False, f'Step {step_id}: {response.get("error", "update failed")}'
+            return True, f'Step {step_id} saved.'
         except Exception as exc:
-            return (f'Program {program_id}', '', '', [], gr.update(value=0), [], 10000, f'ERROR: {exc}')
+            return False, str(exc)
+
+    def ui_program_edit_save_steps(self, program_id: int, step_updates: Dict[int, Dict[str, float]]) -> Optional[str]:
+        if not step_updates:
+            return None
+        try:
+            current = {s.step_id: s for s in self._get_program_steps(program_id)}
+        except Exception as exc:
+            return str(exc)
+        for step_id, fields in sorted(step_updates.items()):
+            if len(fields) < 3:
+                return f'Step {step_id}: missing t_start, t_stop, or minutes.'
+            cur = current.get(int(step_id))
+            if cur and self._step_fields_unchanged(cur, fields):
+                continue
+            ok, msg = self.ui_program_update_single_step(
+                program_id,
+                int(step_id),
+                float(fields['t_start']),
+                float(fields['t_stop']),
+                float(fields['minutes']),
+            )
+            if not ok:
+                return msg
+        return None
+
+    def update_new_program_draft_step(self, step_id: int, t_start: float, t_stop: float, minutes: float) -> None:
+        with self._lock:
+            for row in self._new_program_draft:
+                if int(row[0]) == int(step_id):
+                    row[1] = float(t_start)
+                    row[2] = float(t_stop)
+                    row[3] = float(minutes)
+                    return
+
+    def update_new_program_draft_from_form(self, step_updates: Dict[int, Dict[str, float]]) -> None:
+        if not step_updates:
+            return
+        for step_id, fields in step_updates.items():
+            if len(fields) >= 3:
+                self.update_new_program_draft_step(
+                    int(step_id),
+                    float(fields['t_start']),
+                    float(fields['t_stop']),
+                    float(fields['minutes']),
+                )
 
     def ui_program_edit_save(
         self,
@@ -1286,6 +1507,7 @@ class WebHMINode(Node):
         mode: float,
         enabled_freqs: List[str],
         range_max: float,
+        step_updates: Optional[Dict[int, Dict[str, float]]] = None,
     ) -> str:
         if not self._db_available():
             return self._database_unavailable_message()
@@ -1293,17 +1515,28 @@ class WebHMINode(Node):
         if program_id <= 0:
             return 'No program loaded.'
         try:
-            self._db_query({
+            step_err = self.ui_program_edit_save_steps(program_id, step_updates or {})
+            if step_err:
+                return f'ERROR: {step_err}'
+            meta_resp = self._db_query({
                 'cmd': 'set_program_meta',
                 'program_id': program_id,
                 'key': 'description',
                 'value': str(description or '').strip(),
             })
+            if meta_resp.get('result') != 'Ok':
+                return f'ERROR: {meta_resp.get("error", "description save failed")}'
             freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
-            config = E720SweepConfig(mode=int(mode), enabled_frequencies=freqs, range_max_hz=float(range_max))
+            config = E720SweepConfig(
+                mode=int(mode),
+                enabled_frequencies=freqs,
+                range_min_hz=float(min(freqs)),
+                range_max_hz=float(range_max),
+            )
             response = self._db_query({'cmd': 'set_e720', **config.to_db_payload(program_id)})
             if response.get('result') != 'Ok':
-                return f'ERROR: {response.get("error", "save failed")}'
+                err = response.get('error') or 'E7-20 config save failed'
+                return f'ERROR: {err}'
             self._load_e720_config_for_program(program_id)
             return f'Program {program_id} saved.'
         except Exception as exc:
@@ -1348,62 +1581,14 @@ class WebHMINode(Node):
         msg, banner = self.ui_stop_program()
         return banner, msg
 
-    def ui_program_view_load(self) -> Tuple[Any, ...]:
-        if not self._db_available():
-            return 'Database unavailable.', [], '{}', '{}', self._database_unavailable_message()
-        program_id = self._active_program_id()
-        if program_id <= 0:
-            return (
-                'No program selected. Open [Programs](/programs) and press **Show details**.',
-                [],
-                '{}',
-                '{}',
-                'Select a program first.',
-            )
-        try:
-            detail = self._db_query({'cmd': 'get_program_detail', 'id': program_id})
-            if detail.get('result') != 'Ok':
-                return (f'Program {program_id}', [], '{}', '{}', detail.get('error', 'not found'))
-            row = detail['row']
-            steps = [[s['step_id'], s['t_start'], s['t_stop'], s['minutes']] for s in row.get('steps', [])]
-            desc = (row.get('description') or '').strip() or '_No description_'
-            summary = (
-                f"## Program {row['id']}\n\n"
-                f"- **Created:** {row['datetime']}\n"
-                f"- **Status:** {row['status']}\n"
-                f"- **Description:** {desc}\n"
-                f"- **Temperature steps:** {len(steps)}\n"
-            )
-            stats = row.get('measurement_stats') or {}
-            return (
-                summary,
-                steps,
-                json.dumps(row.get('e720') or {}, indent=2, default=str),
-                json.dumps(stats, indent=2, default=str),
-                f'Loaded program {program_id}.',
-            )
-        except Exception as exc:
-            return (f'Program {program_id}', [], '{}', '{}', f'ERROR: {exc}')
+    def launch_web(self) -> None:
+        import uvicorn
 
-    def build_ui(self) -> gr.Blocks:
-        return build_ui(self)
+        from webui.web_app import create_app
 
-    def launch_ui(self) -> None:
-        demo = self.build_ui()
-        launch_kwargs: Dict[str, Any] = {
-            'server_name': self.bind_host,
-            'server_port': self.bind_port,
-            'show_error': True,
-            'prevent_thread_lock': False,
-            'share': False,
-            'auth': None,
-        }
-        if self.auth_enabled:
-            launch_kwargs['auth'] = (self.auth_user, self.auth_password)
-        if self.queue_enabled:
-            demo.queue()
-        self._log(f'UI at http://{self.bind_host}:{self.bind_port}')
-        demo.launch(**launch_kwargs)
+        app = create_app(self)
+        self._log(f'Web UI at http://{self.bind_host}:{self.bind_port}')
+        uvicorn.run(app, host=self.bind_host, port=self.bind_port, log_level='info')
 
 
 def main(args: Optional[List[str]] = None) -> None:
@@ -1414,7 +1599,7 @@ def main(args: Optional[List[str]] = None) -> None:
     thread = threading.Thread(target=executor.spin, daemon=True)
     thread.start()
     try:
-        node.launch_ui()
+        node.launch_web()
     except KeyboardInterrupt:
         pass
     finally:

@@ -39,9 +39,16 @@ colcon build --symlink-install --packages-select measure_device webui
 # shellcheck disable=SC1091
 source "$WORKSPACE/install/setup.bash"
 
+RUN_PY="$WORKSPACE/install/webui/lib/webui/run.py"
+if [ ! -x "$RUN_PY" ]; then
+  echo "ERROR: webui entrypoint missing: $RUN_PY"
+  echo "Rebuild with: colcon build --packages-select webui"
+  exit 1
+fi
+
 python3 -c "import rclpy; print('rclpy OK')"
-python3 -c "import gradio; print('gradio OK')"
-python3 -c "from webui.node import main; print('webui import OK')"
+python3 -c "import fastapi, uvicorn, jinja2; print('fastapi OK')"
+python3 -c "from webui.node import main; from webui.program_steps import parse_step_field_updates; print('webui import OK')"
 
 echo
 echo "[webui install] OK"

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% set active = 'experiment' %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+<h1>Experiment</h1>
+
+<section class="card">
+  <h2>Status</h2>
+  <p id="exp-banner" class="banner">Connecting…</p>
+</section>
+
+<section class="grid-2">
+  <section class="card">
+    <h2>LTM temperature</h2>
+    <pre id="ltm-summary" class="mono"></pre>
+    <canvas id="temp-chart" height="120"></canvas>
+    <table class="data" id="meas-table">
+      <thead><tr><th>Ch</th><th>Type</th><th>Value</th><th>Valid</th><th>Age s</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3>LTM stream</h3>
+    <pre id="ltm-stream" class="log stream"></pre>
+  </section>
+  <section class="card">
+    <h2>E7-20</h2>
+    <pre id="e720-summary" class="mono"></pre>
+    <table class="data" id="e720-table">
+      <thead><tr><th>Online</th><th>Ch1 param</th><th>Ch1</th><th>Ch2 param</th><th>Ch2</th><th>Freq</th><th>Level</th><th>Offset</th><th>Range</th></tr></thead>
+      <tbody><tr></tr></tbody>
+    </table>
+    <h3>E7-20 stream</h3>
+    <pre id="e720-stream" class="log stream"></pre>
+  </section>
+</section>
+
+<section class="card">
+  <h2>Core temperature control</h2>
+  <pre id="core-json" class="mono"></pre>
+</section>
+
+<section class="card">
+  <h2>Manual target</h2>
+  <form method="post" action="/experiment/manual" class="form-row">
+    <label>Target K <input type="number" name="target_k" step="0.1" value="300"></label>
+    <label><input type="checkbox" name="enabled" value="true"> Enable control</label>
+    <button type="submit">Apply</button>
+  </form>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  window.DELATOMETRY_WS = '/ws/experiment';
+  window.DELATOMETRY_REFRESH_SEC = {{ refresh_sec }};
+</script>
+<script src="/static/experiment.js" defer></script>
+{% endblock %}

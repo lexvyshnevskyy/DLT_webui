@@ -2,7 +2,7 @@
 <package format="3">
   <name>webui</name>
   <version>0.1.0</version>
-  <description>Gradio-based web HMI node for experiment monitoring and control.</description>
+  <description>FastAPI web HMI node for experiment monitoring and control.</description>
   <maintainer email="lex.vyshnevskyy@gmail.com">Oleksii Vyshnevskyi</maintainer>
   <license>MIT</license>
 

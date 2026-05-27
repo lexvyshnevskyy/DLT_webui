@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set active = 'programs' %}
+{% block content %}
+<div class="page-head">
+  <h1>Programs</h1>
+  <a class="btn primary" href="/program-new?new=1">New program</a>
+</div>
+
+<table class="data programs-table">
+  <thead>
+    <tr><th>ID</th><th>Created</th><th>Status</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+  {% for row in programs %}
+    <tr>
+      <td><a href="/program-view?id={{ row[0] }}">{{ row[0] }}</a></td>
+      <td><a href="/program-view?id={{ row[0] }}">{{ row[1] }}</a></td>
+      <td>{{ row[2] }}</td>
+      <td class="actions">
+        <a href="/program-edit?id={{ row[0] }}">Edit</a>
+        <a href="/programs/export?id={{ row[0] }}">Export ZIP</a>
+        <form method="post" action="/programs/delete" class="inline" onsubmit="return confirm('Delete program {{ row[0] }} and all measurements?');">
+          <input type="hidden" name="id" value="{{ row[0] }}">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4">No programs in database.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

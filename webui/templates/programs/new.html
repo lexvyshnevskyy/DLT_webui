@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% set active = 'programs' %}
+{% block content %}
+<div class="page-head">
+  <h1>New program</h1>
+  <a href="/programs">← Programs</a>
+</div>
+
+<form method="post" action="/program-new" class="card">
+  <h2>Temperature steps</h2>
+  <p class="muted">Edit a cell and click outside the row to update the draft. Press <strong>Create program</strong> when finished.</p>
+  <table class="data steps-edit-table" data-mode="new">
+    <thead><tr><th>#</th><th>t_start K</th><th>t_stop K</th><th>minutes</th><th></th></tr></thead>
+    <tbody>
+    {% for row in steps %}
+      <tr data-step-id="{{ row[0] }}">
+        <td>{{ row[0] }}</td>
+        <td><input type="number" name="step_{{ row[0] }}_t_start" value="{{ row[1] }}" step="0.1" class="step-input" data-field="t_start"></td>
+        <td><input type="number" name="step_{{ row[0] }}_t_stop" value="{{ row[2] }}" step="0.1" class="step-input" data-field="t_stop"></td>
+        <td><input type="number" name="step_{{ row[0] }}_minutes" value="{{ row[3] }}" step="0.1" class="step-input" data-field="minutes"></td>
+        <td class="actions">
+          <button type="submit"
+                  formaction="/program-new/steps/remove"
+                  formmethod="post"
+                  class="danger"
+                  name="step_id"
+                  value="{{ row[0] }}">Remove</button>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5">No steps yet — add at least one before creating.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <label>Description <input type="text" name="description" value="{{ description }}" class="wide"></label>
+
+  <h2>E7-20 sweep</h2>
+  <label>Mode
+    <select name="sweep_mode">
+      {% for label, key in e720.modes %}
+      <option value="{{ key }}">{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <fieldset>
+    <legend>Enabled frequencies (Hz)</legend>
+    <div class="freq-grid">
+      {% for f in e720.frequencies %}
+      <label><input type="checkbox" name="enabled_freqs" value="{{ f }}"> {{ f }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <label>Range max Hz <input type="number" name="range_max" value="10000" step="1"></label>
+  <button type="submit" class="btn primary">Create program</button>
+</form>
+
+<section class="card">
+  <h3>Add step</h3>
+  <form method="post" action="/program-new/steps/add" class="form-row">
+    <label>t_start <input type="number" name="t_start" step="0.1" value="{{ default_step[0] }}"></label>
+    <label>t_stop <input type="number" name="t_stop" step="0.1" value="{{ default_step[1] }}"></label>
+    <label>minutes <input type="number" name="minutes" step="0.1" value="{{ default_step[2] }}"></label>
+    <button type="submit">Add step</button>
+  </form>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/program_steps.js" defer></script>
+{% endblock %}

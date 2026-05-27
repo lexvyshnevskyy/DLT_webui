@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ title }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand">{{ title }}</div>
+    <nav class="main-nav">
+      <a href="/dashboard" class="{% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+      <a href="/programs" class="{% if active == 'programs' %}active{% endif %}">Programs</a>
+      <a href="/experiment" class="{% if active == 'experiment' %}active{% endif %}">Experiment</a>
+      <a href="/configuration" class="{% if active == 'config' %}active{% endif %}">Configuration</a>
+    </nav>
+  </header>
+  <main class="page">
+    {% if message %}
+    <div class="flash">{{ message }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

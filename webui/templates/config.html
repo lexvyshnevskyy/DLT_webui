@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% set active = 'config' %}
+{% block content %}
+<h1>Configuration</h1>
+<p class="muted">Settings in <code>{{ env_file }}</code>. Enable <strong>Restart service</strong> to apply immediately.</p>
+<p>{{ status }}</p>
+
+<details class="config-section" open>
+  <summary>Network</summary>
+  <section class="card">
+    <table class="data">
+      <thead><tr><th>Interface</th><th>State</th><th>MAC</th><th>IPv4</th></tr></thead>
+      <tbody>
+      {% for row in interfaces %}
+        <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <form method="post" action="/configuration/network/select" class="form-row">
+      <label>Interface
+        <select name="iface">
+          {% for i in iface_choices %}
+          <option value="{{ i }}" {% if i == selected_iface %}selected{% endif %}>{{ i }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">Select</button>
+    </form>
+    <p><strong>{{ iface_info }}</strong></p>
+    <div class="form-row">
+      <form method="post" action="/configuration/network/up" class="inline">
+        <input type="hidden" name="iface" value="{{ selected_iface }}">
+        <button type="submit">Bring up</button>
+      </form>
+      <form method="post" action="/configuration/network/down" class="inline">
+        <input type="hidden" name="iface" value="{{ selected_iface }}">
+        <button type="submit">Bring down</button>
+      </form>
+      <form method="post" action="/configuration/network/dhcp" class="inline">
+        <input type="hidden" name="iface" value="{{ selected_iface }}">
+        <button type="submit">Use DHCP</button>
+      </form>
+    </div>
+    <form method="post" action="/configuration/network/static" class="form-row">
+      <input type="hidden" name="iface" value="{{ selected_iface }}">
+      <label>IPv4 <input name="address" value="{{ net_ip }}"></label>
+      <label>Prefix <input type="number" name="prefix" value="{{ net_prefix }}"></label>
+      <label>Gateway <input name="gateway" placeholder="optional"></label>
+      <label>DNS <input name="dns" placeholder="optional"></label>
+      <button type="submit">Apply static IPv4</button>
+    </form>
+    <p>Hotspot: {{ hotspot_status }} (SSID {{ hotspot_ssid }})</p>
+    {% if is_wifi %}
+    <h3>Wi‑Fi client</h3>
+    <form method="post" action="/configuration/network/wifi-scan" class="inline">
+      <input type="hidden" name="iface" value="{{ selected_iface }}">
+      <button type="submit">Scan networks</button>
+    </form>
+    <table class="data">
+      <thead><tr><th>In use</th><th>SSID</th><th>Signal</th><th>Security</th></tr></thead>
+      <tbody>
+      {% for row in wifi_networks %}
+        <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <form method="post" action="/configuration/network/wifi-connect" class="form-row">
+      <input type="hidden" name="iface" value="{{ selected_iface }}">
+      <label>SSID <input name="ssid"></label>
+      <label>Password <input type="password" name="password"></label>
+      <button type="submit">Connect</button>
+    </form>
+    <form method="post" action="/configuration/network/hotspot-enable" class="inline">
+      <input type="hidden" name="iface" value="{{ selected_iface }}">
+      <button type="submit">Enable hotspot</button>
+    </form>
+    <form method="post" action="/configuration/network/hotspot-disable" class="inline">
+      <button type="submit">Disable hotspot</button>
+    </form>
+    {% endif %}
+  </section>
+</details>
+
+<details class="config-section" id="ltm" open>
+  <summary>LTM2985 UART</summary>
+  <section class="card">
+    <form method="post" action="/configuration/peek/ltm"><button type="submit">Read LTM topic</button></form>
+    {% if peek.ltm %}<pre class="mono">{{ peek.ltm }}</pre>{% endif %}
+    <form method="post" action="/configuration/ltm" class="form-row">
+      <label>Port <input name="port" list="ltm-ports" value="{{ ltm.port }}"></label>
+      <datalist id="ltm-ports">{% for p in ltm_port_choices %}<option value="{{ p }}">{% endfor %}</datalist>
+      <label>Baud <input type="number" name="baudrate" value="{{ ltm.baudrate }}"></label>
+      <label><input type="checkbox" name="restart" value="true"> Restart service</label>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+</details>
+
+<details class="config-section" id="e720">
+  <summary>E7-20 / measure_device</summary>
+  <section class="card">
+    <form method="post" action="/configuration/peek/e720"><button type="submit">Read E7-20 topic</button></form>
+    {% if peek.e720 %}<pre class="mono">{{ peek.e720 }}</pre>{% endif %}
+    <form method="post" action="/configuration/measure" class="form-row">
+      <label>Port <input name="port" list="meas-ports" value="{{ meas.port }}"></label>
+      <datalist id="meas-ports">{% for p in meas_port_choices %}<option value="{{ p }}">{% endfor %}</datalist>
+      <label>Baud <input type="number" name="speed" value="{{ meas.speed }}"></label>
+      <label><input type="checkbox" name="restart" value="true"> Restart service</label>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+</details>
+
+<details class="config-section" id="hmi">
+  <summary>HMI (Nextion)</summary>
+  <section class="card">
+    <form method="post" action="/configuration/peek/hmi"><button type="submit">Read HMI topics</button></form>
+    {% if peek.hmi %}<pre class="mono">{{ peek.hmi }}</pre>{% endif %}
+  </section>
+</details>
+
+<details class="config-section">
+  <summary>Database (MariaDB)</summary>
+  <section class="card">
+    <form method="post" action="/configuration/database/test" class="form-row">
+      <label>Host <input name="host" value="{{ db.host }}"></label>
+      <label>Port <input type="number" name="port" value="{{ db.port }}"></label>
+      <label>DB <input name="name" value="{{ db.name }}"></label>
+      <label>User <input name="user" value="{{ db.user }}"></label>
+      <label>Password <input type="password" name="password" value="{{ db.password }}"></label>
+      <button type="submit">Test connection</button>
+    </form>
+    {% if peek.db_test %}<p>{{ peek.db_test }}</p>{% endif %}
+    <form method="post" action="/configuration/database" class="form-row">
+      <input type="hidden" name="host" value="{{ db.host }}">
+      <input type="hidden" name="port" value="{{ db.port }}">
+      <input type="hidden" name="name" value="{{ db.name }}">
+      <input type="hidden" name="user" value="{{ db.user }}">
+      <label>Password <input type="password" name="password" value="{{ db.password }}"></label>
+      <label><input type="checkbox" name="auto_init" value="true" {% if db.auto_init_schema %}checked{% endif %}> Auto-init schema</label>
+      <label><input type="checkbox" name="restart" value="true"> Restart service</label>
+      <button type="submit">Save database</button>
+    </form>
+  </section>
+</details>
+
+<details class="config-section">
+  <summary>Core (temperature control)</summary>
+  <section class="card">
+    <form method="post" action="/configuration/core" class="form-row">
+      <label>PWM CH1 <select name="pwm_ch1">{% for p in pwm_pins %}<option value="{{ p }}" {% if p == core.pwm_pin_ch1|string %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+      <label>PWM CH2 <select name="pwm_ch2">{% for p in pwm_pins %}<option value="{{ p }}" {% if p == core.pwm_pin_ch2|string %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+      <label><input type="checkbox" name="enable_db_client" value="true" {% if core.enable_database_client %}checked{% endif %}> DB client</label>
+      <label><input type="checkbox" name="enable_pwm" value="true" {% if core.enable_pwm_controller %}checked{% endif %}> PWM control</label>
+      <label><input type="checkbox" name="restart" value="true"> Restart</label>
+      <button type="submit">Save core</button>
+    </form>
+  </section>
+</details>
+
+<details class="config-section" id="ads">
+  <summary>ADS1256</summary>
+  <section class="card">
+    <form method="post" action="/configuration/peek/ads"><button type="submit">Read ADS topic</button></form>
+    {% if peek.ads %}<pre class="mono">{{ peek.ads }}</pre>{% endif %}
+    <form method="post" action="/configuration/ads" class="form-row">
+      <label><input type="checkbox" name="enabled" value="true" {% if ads.enabled %}checked{% endif %}> Enable node</label>
+      <label><input type="checkbox" name="simulate" value="true" {% if ads.simulate %}checked{% endif %}> Simulate</label>
+      <label><input type="checkbox" name="fallback" value="true" {% if ads.fallback_to_simulation %}checked{% endif %}> Fallback sim</label>
+      <label><input type="checkbox" name="restart" value="true"> Restart</label>
+      <button type="submit">Save ADS1256</button>
+    </form>
+  </section>
+</details>
+{% endblock %}

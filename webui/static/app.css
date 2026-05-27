@@ -1,0 +1,138 @@
+:root {
+  --bg: #0f1419;
+  --surface: #1a2332;
+  --border: #2d3a4f;
+  --text: #e8eef7;
+  --muted: #9aa8bc;
+  --accent: #3d8bfd;
+  --ok: #3dd68c;
+  --err: #f87171;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 600; }
+.main-nav a {
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 1rem;
+}
+.main-nav a.active, .main-nav a:hover { color: var(--text); }
+
+.page { max-width: 1200px; margin: 0 auto; padding: 1.25rem; }
+.page-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.page-head h1 { margin: 0; flex: 1; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.card h2 { margin-top: 0; font-size: 1.1rem; }
+
+.flash {
+  background: #2a3f5f;
+  border: 1px solid var(--accent);
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+.data { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.data th, .data td { border-bottom: 1px solid var(--border); padding: 0.45rem 0.6rem; text-align: left; }
+.data th { color: var(--muted); font-weight: 500; }
+.data a { color: var(--accent); }
+
+.btn, button, input[type=submit] {
+  background: var(--border);
+  color: var(--text);
+  border: none;
+  padding: 0.4rem 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.btn.primary, button.primary { background: var(--accent); }
+button.danger { background: #5c2a2a; color: #fecaca; }
+a.btn { text-decoration: none; display: inline-block; }
+
+.form-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin: 0.5rem 0; }
+label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; color: var(--muted); }
+input, select, textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+}
+input.wide { min-width: 280px; }
+.inline { display: inline; }
+.actions { white-space: nowrap; }
+.actions form { display: inline; margin-left: 0.35rem; }
+.service-actions form { display: inline-block; margin: 0 0.15rem 0 0; }
+.service-actions button[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+.kv { list-style: none; padding: 0; margin: 0; }
+.kv li { display: flex; justify-content: space-between; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+.kv .ok { color: var(--ok); }
+.kv .err { color: var(--err); }
+
+.banner { font-weight: 600; padding: 0.5rem 0; }
+.mono, .log, pre.summary {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log.stream { max-height: 200px; overflow-y: auto; background: var(--bg); padding: 0.5rem; border-radius: 4px; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.freq-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.25rem 0.5rem;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.freq-grid label { flex-direction: row; align-items: center; gap: 0.35rem; color: var(--text); }
+
+.steps-edit-table .step-input {
+  width: 5.5rem;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.9rem;
+}
+.steps-edit-table td { vertical-align: middle; }
+.step-save-status {
+  display: block;
+  font-size: 0.75rem;
+  margin-top: 0.25rem;
+}
+.step-save-status.ok { color: var(--ok); }
+.step-save-status.err { color: var(--err); }
+.muted { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.75rem; }
+
+details.config-section { margin-bottom: 0.75rem; }
+details.config-section summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.5rem 0;
+}

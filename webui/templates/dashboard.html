@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% set active = 'dashboard' %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<section class="card">
+  <h2>System status</h2>
+  <ul class="kv">
+    <li><span>Core</span><strong class="{{ 'ok' if services.core_available else 'err' }}">{{ 'OK' if services.core_available else 'DOWN' }}</strong></li>
+    <li><span>Database</span><strong class="{{ 'ok' if services.database_available else 'err' }}">{{ 'OK' if services.database_available else 'DOWN' }}</strong></li>
+    <li><span>Ready</span><strong>{{ 'yes' if services.system_ready else 'no' }}</strong></li>
+    {% if services.pwm_note %}<li><span>PWM</span><em>{{ services.pwm_note }}</em></li>{% endif %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Host</h2>
+  {% if host.error %}
+  <p class="err">{{ host.error }}</p>
+  {% else %}
+  <ul class="kv">
+    <li><span>CPU</span><strong>{{ host.cpu_percent }}%</strong></li>
+    <li><span>Load</span><strong>{{ host.load_avg }}</strong></li>
+    <li><span>Memory</span><strong>{{ host.memory_percent }}% ({{ host.memory_used_gb }}/{{ host.memory_total_gb }} GB)</strong></li>
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Services</h2>
+  {% if not enable_service_control %}
+  <p class="muted">Service control is disabled (enable_service_control:=true).</p>
+  {% else %}
+  <p class="muted">Requires passwordless sudo for systemctl — run <code>sudo bash src/webui/scripts/install_sudoers.sh</code> on the Pi.</p>
+  {% endif %}
+  <table class="data">
+    <thead><tr><th>Unit</th><th>Active</th><th>Sub</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for row in units %}
+      <tr>
+        <td><code>{{ row[0] }}</code></td>
+        <td>{{ row[1] }}</td>
+        <td>{{ row[2] }}</td>
+        <td class="actions service-actions">
+          {% if enable_service_control %}
+          <form method="post" action="/dashboard/service" class="inline">
+            <input type="hidden" name="unit" value="{{ row[0] }}">
+            <input type="hidden" name="action" value="start">
+            <button type="submit">start</button>
+          </form>
+          <form method="post" action="/dashboard/service" class="inline">
+            <input type="hidden" name="unit" value="{{ row[0] }}">
+            <input type="hidden" name="action" value="stop">
+            <button type="submit" {% if row[0] in ['delatometry-webui.service', 'mariadb.service', 'mysql.service'] %}disabled title="Use SSH"{% endif %}>stop</button>
+          </form>
+          <form method="post" action="/dashboard/service" class="inline">
+            <input type="hidden" name="unit" value="{{ row[0] }}">
+            <input type="hidden" name="action" value="restart">
+            <button type="submit" {% if row[0] == 'delatometry-webui.service' %}disabled title="Use SSH"{% endif %}>restart</button>
+          </form>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Disk</h2>
+  <table class="data">
+    <thead><tr><th>Mount</th><th>Used %</th><th>Free GB</th></tr></thead>
+    <tbody>
+    {% for row in disks %}
+      <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>UART ports</h2>
+  <table class="data">
+    <thead><tr><th>Device</th><th>Description</th></tr></thead>
+    <tbody>
+    {% for row in uart %}
+      <tr><td><code>{{ row[0] }}</code></td><td>{{ row[1] }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Network interfaces</h2>
+  <table class="data">
+    <thead><tr><th>Interface</th><th>State</th><th>MAC</th><th>IPv4</th></tr></thead>
+    <tbody>
+    {% for row in interfaces %}
+      <tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Log</h2>
+  <pre class="log">{{ log_text }}</pre>
+</section>
+{% endblock %}

@@ -10,25 +10,64 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+SYSTEMCTL="$(command -v systemctl)"
+if [ -z "$SYSTEMCTL" ]; then
+  echo "ERROR: systemctl not found"
+  exit 1
+fi
+echo "Using systemctl: $SYSTEMCTL"
+
+# Also allow /bin/systemctl if it differs (sudo matches exact paths).
+SYSTEMCTL_EXTRA=""
+if [ "$SYSTEMCTL" != "/bin/systemctl" ] && [ -x /bin/systemctl ]; then
+  SYSTEMCTL_EXTRA="/bin/systemctl"
+fi
+
 install -m 0440 /dev/stdin "$SUDOERS_FILE" <<EOF
-# Delatometry webui — systemd + NetworkManager (edit user if needed)
-${RUN_USER} ALL=(root) NOPASSWD: /bin/systemctl start delatometry-*, \\
-  /bin/systemctl stop delatometry-*, \\
-  /bin/systemctl restart delatometry-*, \\
-  /bin/systemctl enable delatometry-*, \\
-  /bin/systemctl disable delatometry-*, \\
-  /bin/systemctl is-active delatometry-*, \\
-  /bin/systemctl is-enabled delatometry-*, \\
-  /bin/systemctl show delatometry-*, \\
+# Delatometry webui — systemd + NetworkManager (user: ${RUN_USER})
+${RUN_USER} ALL=(root) NOPASSWD: \\
+  ${SYSTEMCTL} start delatometry-*, \\
+  ${SYSTEMCTL} stop delatometry-*, \\
+  ${SYSTEMCTL} restart delatometry-*, \\
+  ${SYSTEMCTL} enable delatometry-*, \\
+  ${SYSTEMCTL} disable delatometry-*, \\
+  ${SYSTEMCTL} is-active delatometry-*, \\
+  ${SYSTEMCTL} is-enabled delatometry-*, \\
+  ${SYSTEMCTL} show delatometry-*, \\
+  ${SYSTEMCTL} start mariadb.service, \\
+  ${SYSTEMCTL} stop mariadb.service, \\
+  ${SYSTEMCTL} restart mariadb.service, \\
+  ${SYSTEMCTL} start mysql.service, \\
+  ${SYSTEMCTL} stop mysql.service, \\
+  ${SYSTEMCTL} restart mysql.service, \\
+  ${SYSTEMCTL} start pigpiod.service, \\
+  ${SYSTEMCTL} stop pigpiod.service, \\
+  ${SYSTEMCTL} restart pigpiod.service, \\
   /usr/bin/tee /etc/default/delatometry, \\
   /usr/bin/tee /etc/delatometry/hotspot-dnsmasq.conf, \\
   /usr/bin/cat /etc/default/delatometry, \\
   /usr/bin/nmcli, \\
-  /bin/systemctl enable delatometry-hotspot-dnsmasq.service, \\
-  /bin/systemctl disable delatometry-hotspot-dnsmasq.service, \\
-  /bin/systemctl start delatometry-hotspot-dnsmasq.service, \\
-  /bin/systemctl stop delatometry-hotspot-dnsmasq.service
+  ${SYSTEMCTL} enable delatometry-hotspot-dnsmasq.service, \\
+  ${SYSTEMCTL} disable delatometry-hotspot-dnsmasq.service, \\
+  ${SYSTEMCTL} start delatometry-hotspot-dnsmasq.service, \\
+  ${SYSTEMCTL} stop delatometry-hotspot-dnsmasq.service
 EOF
+
+if [ -n "$SYSTEMCTL_EXTRA" ]; then
+  install -m 0440 /dev/stdin "${SUDOERS_FILE}.bin" <<EOF
+${RUN_USER} ALL=(root) NOPASSWD: \\
+  ${SYSTEMCTL_EXTRA} start delatometry-*, \\
+  ${SYSTEMCTL_EXTRA} stop delatometry-*, \\
+  ${SYSTEMCTL_EXTRA} restart delatometry-*, \\
+  ${SYSTEMCTL_EXTRA} start mariadb.service, \\
+  ${SYSTEMCTL_EXTRA} stop mariadb.service, \\
+  ${SYSTEMCTL_EXTRA} restart mariadb.service, \\
+  ${SYSTEMCTL_EXTRA} start pigpiod.service, \\
+  ${SYSTEMCTL_EXTRA} stop pigpiod.service, \\
+  ${SYSTEMCTL_EXTRA} restart pigpiod.service
+EOF
+  visudo -cf "${SUDOERS_FILE}.bin"
+fi
 
 visudo -cf "$SUDOERS_FILE"
 echo "Installed $SUDOERS_FILE for user ${RUN_USER}"

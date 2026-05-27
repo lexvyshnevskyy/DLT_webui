@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,10 @@ DEFAULT_UNITS = [
 ]
 
 
+def _systemctl_bin() -> str:
+    return shutil.which('systemctl') or '/usr/bin/systemctl'
+
+
 def _run(cmd: List[str], use_sudo: bool = False, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
     full_cmd = ['sudo', '-n', *cmd] if use_sudo else cmd
     return subprocess.run(
@@ -35,15 +40,19 @@ def _run(cmd: List[str], use_sudo: bool = False, timeout: float = 15.0) -> subpr
     )
 
 
+def _run_systemctl(args: List[str], use_sudo: bool = False, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+    return _run([_systemctl_bin(), *args], use_sudo=use_sudo, timeout=timeout)
+
+
 def get_unit_status(unit: str) -> Dict[str, str]:
-    result = _run(['systemctl', 'show', unit, '--property=ActiveState,SubState,UnitFileState,MainPID'], use_sudo=False)
+    result = _run_systemctl(['show', unit, '--property=ActiveState,SubState,UnitFileState,MainPID'], use_sudo=False)
     props: Dict[str, str] = {}
     if result.returncode == 0:
         for line in result.stdout.splitlines():
             if '=' in line:
                 key, value = line.split('=', 1)
                 props[key.strip()] = value.strip()
-    active = _run(['systemctl', 'is-active', unit], use_sudo=False)
+    active = _run_systemctl(['is-active', unit], use_sudo=False)
     return {
         'unit': unit,
         'active': active.stdout.strip() if active.returncode == 0 else 'unknown',
@@ -78,23 +87,43 @@ def control_unit(unit: str, action: str, use_sudo: bool = True) -> Dict[str, Any
         return {'ok': False, 'error': f'Unsupported action: {action}'}
     if not unit.endswith('.service'):
         unit = f'{unit}.service'
-    if action in {'stop', 'restart'} and unit in PROTECTED_STOP_UNITS:
+    blocked = unit_action_blocked(unit, action)
+    if blocked:
+        return {'ok': False, 'unit': unit, 'action': action, 'error': blocked}
+    result = _run_systemctl([action, unit], use_sudo=use_sudo)
+    ok = result.returncode == 0
+    err_text = result.stderr.strip() or result.stdout.strip()
+    if not ok and use_sudo and ('password is required' in err_text.lower() or 'not allowed' in err_text.lower()):
+        hint = (
+            f'sudo denied ({err_text}). On the Pi run: '
+            'sudo bash ~/ros2_delatometry/src/webui/scripts/install_sudoers.sh'
+        )
         return {
             'ok': False,
             'unit': unit,
             'action': action,
-            'error': (
-                f'Refusing to {action} {unit} from web UI '
-                '(would disconnect this page or stop MariaDB for all nodes). Use SSH/systemctl.'
-            ),
+            'stdout': result.stdout.strip(),
+            'stderr': result.stderr.strip(),
+            'error': hint,
         }
-    result = _run(['systemctl', action, unit], use_sudo=use_sudo)
-    ok = result.returncode == 0
     return {
         'ok': ok,
         'unit': unit,
         'action': action,
         'stdout': result.stdout.strip(),
         'stderr': result.stderr.strip(),
-        'error': '' if ok else (result.stderr.strip() or result.stdout.strip() or f'exit {result.returncode}'),
+        'error': '' if ok else (err_text or f'exit {result.returncode}'),
     }
+
+
+def unit_action_blocked(unit: str, action: str) -> Optional[str]:
+    """Return error message if this unit/action must not run from the web UI."""
+    if not unit.endswith('.service'):
+        unit = f'{unit}.service'
+    action = action.strip().lower()
+    if action in {'stop', 'restart'} and unit in PROTECTED_STOP_UNITS:
+        return (
+            f'Cannot {action} {unit} from the dashboard '
+            '(would disconnect this page or stop MariaDB for all nodes). Use SSH.'
+        )
+    return None

@@ -2,19 +2,33 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastapi import Request
+from fastapi.responses import RedirectResponse
 import gradio as gr
+from starlette.routing import Route
+
 
 from webui.ui_config_tab import build_configuration_tab
 from webui.ui_experiment_page import build_experiment_page
-from webui.ui_programs import (
-    build_program_create,
-    build_program_edit,
-    build_program_view,
-    build_programs_list,
-)
+from webui.ui_program_edit import build_program_edit_page
+from webui.ui_program_new import build_program_new_page
+from webui.ui_program_view import build_program_view_page
+from webui.ui_programs_list import build_programs_list_page
 
 if TYPE_CHECKING:
     from webui.node import WebHMINode
+
+
+async def program_new_redirect(request: Request) -> RedirectResponse:
+    """Compatibility URL for users/scripts expecting /program/new."""
+    root_path = str(request.scope.get('root_path') or '').rstrip('/')
+    return RedirectResponse(url=f'{root_path}/program-new', status_code=307)
+
+
+PROGRAM_NEW_COMPAT_ROUTES = [
+    Route('/program/new', program_new_redirect, methods=['GET']),
+    Route('/program/new/', program_new_redirect, methods=['GET']),
+]
 
 
 def build_ui(node: 'WebHMINode') -> gr.Blocks:
@@ -84,19 +98,19 @@ def build_ui(node: 'WebHMINode') -> gr.Blocks:
         demo.load(node.ui_tick_general, outputs=general_outputs)
 
     with demo.route('Programs', 'programs') as programs_page:
-        programs_list_outputs = build_programs_list(node)
-        programs_page.load(node.ui_programs_list_refresh, outputs=programs_list_outputs)
+        programs_list_outputs = build_programs_list_page(node)
+        programs_page.load(node.ui_programs_page_load, outputs=programs_list_outputs)
 
     with demo.route('New program', 'program-new'):
-        build_program_create(node)
+        build_program_new_page(node)
 
-    with demo.route('Edit program', 'program-edit') as edit_page:
-        program_edit_outputs = build_program_edit(node)
-        edit_page.load(node.ui_program_edit_load, outputs=program_edit_outputs)
+    with demo.route('Program details', 'program-view') as program_view_page:
+        program_view_outputs = build_program_view_page(node)
+        program_view_page.load(node.ui_program_view_page_load, outputs=program_view_outputs)
 
-    with demo.route('Program details', 'program-view') as view_page:
-        program_view_outputs = build_program_view(node)
-        view_page.load(node.ui_program_view_load, outputs=program_view_outputs)
+    with demo.route('Edit program', 'program-edit') as program_edit_page:
+        program_edit_outputs = build_program_edit_page(node)
+        program_edit_page.load(node.ui_program_edit_page_load, outputs=program_edit_outputs)
 
     with demo.route('Experiment', 'experiment') as experiment_page:
         experiment_tick_outputs = build_experiment_page(node)

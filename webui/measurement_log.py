@@ -12,10 +12,12 @@ def build_measurement_row(
     control_channel: int,
     monitor_channel: int,
     target_k: Optional[float],
+    *,
+    run_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     control = temperatures.get(control_channel, {})
     monitor = temperatures.get(monitor_channel, {})
-    return {
+    row: Dict[str, Any] = {
         'program_id': program_id,
         'freq': float(e720.get('frequency', 0.0) or 0.0),
         'measure_ch1': float(e720.get('firstvalue', 0.0) or 0.0),
@@ -24,6 +26,9 @@ def build_measurement_row(
         't_ch2': float(monitor.get('value', 0.0) or 0.0),
         't_exp': float(target_k if target_k is not None else 0.0),
     }
+    if run_id is not None and int(run_id) > 0:
+        row['run_id'] = int(run_id)
+    return row
 
 
 def insert_measurement(db_query: DbQueryFn, row: Dict[str, Any]) -> bool:

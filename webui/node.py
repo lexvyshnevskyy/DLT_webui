@@ -77,6 +77,7 @@ class WebHMINode(Node):
         self.declare_parameter('enable_service_control', True)
         self.declare_parameter('network_use_sudo', True)
         self.declare_parameter('enable_measurement_logging', True)
+        self.declare_parameter('measurement_log_period_sec', 0.333)
         self.declare_parameter('measurement_log_control_channel', 9)
         self.declare_parameter('measurement_log_monitor_channel', 3)
         self.declare_parameter('ltm_raw_topic', '/ltm2985/raw_json')
@@ -104,6 +105,10 @@ class WebHMINode(Node):
         self.enable_service_control = bool(self.get_parameter('enable_service_control').value)
         self.network_use_sudo = bool(self.get_parameter('network_use_sudo').value)
         self.enable_measurement_logging = bool(self.get_parameter('enable_measurement_logging').value)
+        self.measurement_log_period_sec = max(
+            0.1,
+            float(self.get_parameter('measurement_log_period_sec').value),
+        )
         self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
         self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
         self.ltm_raw_topic = str(self.get_parameter('ltm_raw_topic').value)
@@ -157,6 +162,11 @@ class WebHMINode(Node):
         self._last_measurement_log_monotonic: float = 0.0
 
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
+        if self.enable_measurement_logging:
+            self._measurement_log_timer = self.create_timer(
+                self.measurement_log_period_sec,
+                self._measurement_log_tick,
+            )
         self._log('webui node started')
 
     def _log(self, message: str) -> None:
@@ -308,20 +318,28 @@ class WebHMINode(Node):
         msg.data = int(byte_val) & 0xFF
         self._e720_cmd_pub.publish(msg)
 
-    def _maybe_log_measurement(self, target_k: Optional[float]) -> None:
+    def _measurement_log_tick(self) -> None:
+        with self._lock:
+            if self._experiment.program_id is None or self._experiment.run_id is None:
+                return
+            target_k = self._experiment.last_target_k
+        self._maybe_log_measurement(target_k, rate_limit=False)
+
+    def _maybe_log_measurement(self, target_k: Optional[float], *, rate_limit: bool = True) -> None:
         if not self.enable_measurement_logging or not self._db_available():
             return
         with self._lock:
             program_id = self._experiment.program_id
+            run_id = self._experiment.run_id
             e720_msg = self._latest_e720
             temps = dict(self._latest_measurements)
-        if program_id is None:
+        if program_id is None or run_id is None:
             return
         e720 = e720_from_msg(e720_msg)
         if not e720.get('online'):
             return
         now = time.monotonic()
-        if now - self._last_measurement_log_monotonic < self.control_loop_period_sec * 0.9:
+        if rate_limit and now - self._last_measurement_log_monotonic < self.measurement_log_period_sec * 0.9:
             return
         row = build_measurement_row(
             program_id,
@@ -330,12 +348,50 @@ class WebHMINode(Node):
             self.log_control_channel,
             self.log_monitor_channel,
             target_k,
+            run_id=int(run_id),
         )
         try:
             if insert_measurement(self._db_query, row):
                 self._last_measurement_log_monotonic = now
         except Exception as exc:
             self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
+
+    def _start_program_run_record(self, program_id: int) -> Tuple[Optional[int], Optional[int], str]:
+        if not self._db_available():
+            return None, None, ''
+        response = self._db_query({'cmd': 'program_run_start', 'program_id': program_id})
+        if response.get('result') != 'Ok':
+            return None, None, str(response.get('error', 'program run start failed'))
+        row = response.get('row') or {}
+        run_id = int(row.get('run_id', 0) or 0)
+        run_index = int(row.get('run_index', 0) or 0)
+        if run_id <= 0:
+            return None, None, 'program run start returned no run_id'
+        return run_id, run_index, ''
+
+    def _finish_program_run_record(self, run_id: Optional[int], final_status: str) -> None:
+        if not self._db_available() or run_id is None or int(run_id) <= 0:
+            return
+        try:
+            self._db_query({
+                'cmd': 'program_run_finish',
+                'run_id': int(run_id),
+                'status': final_status,
+            })
+        except Exception as exc:
+            self._log(f'Failed to finish program run {run_id}: {exc}')
+
+    def _finish_program_runs_for_program(self, program_id: int, final_status: str = 'Stopped') -> None:
+        if not self._db_available():
+            return
+        try:
+            self._db_query({
+                'cmd': 'program_run_finish_active',
+                'program_id': int(program_id),
+                'status': final_status,
+            })
+        except Exception as exc:
+            self._log(f'Failed to finish active runs for program {program_id}: {exc}')
 
     def _control_tick(self) -> None:
         try:
@@ -364,7 +420,6 @@ class WebHMINode(Node):
                     step = self._experiment.step_index + 1
                     total = len(self._experiment.steps)
                     self._log(f'Program {pid}: step {step}/{total}, target {target_k:.2f} K')
-                self._maybe_log_measurement(float(target_k))
         except Exception as exc:
             self._log(f'Control loop error: {exc}')
 
@@ -420,10 +475,12 @@ class WebHMINode(Node):
 
     def _finish_active_program(self, final_status: str) -> None:
         program_id = self._experiment.program_id
+        run_id = self._experiment.run_id
         if program_id is None:
             self._halt_temperature_control('no active program')
             return
         self._halt_temperature_control('program ended')
+        self._finish_program_run_record(run_id, final_status)
         try:
             self._db_query({'cmd': 'program_update_status', 'id': program_id, 'status': final_status})
         except Exception as exc:
@@ -493,18 +550,55 @@ class WebHMINode(Node):
             lines = list(stream)
         return '\n'.join(lines) if lines else '(no messages yet)'
 
+    def _program_run_counts_map(self) -> Dict[int, int]:
+        if not self._db_available():
+            return {}
+        response = self._db_query({'cmd': 'program_run_counts'})
+        if response.get('result') != 'Ok':
+            return {}
+        counts: Dict[int, int] = {}
+        for raw_row in response.get('row', []):
+            parts = str(raw_row).split('^')
+            if len(parts) >= 2:
+                counts[int(parts[0])] = int(parts[1])
+        return counts
+
     def _programs_table(self) -> List[List[Any]]:
         if not self._db_available():
             return []
         response = self._db_query({'cmd': 'program_all_list'})
         if response.get('result') != 'Ok':
             return []
+        run_counts = self._program_run_counts_map()
         rows = []
         for raw_row in response.get('row', []):
             parts = str(raw_row).split('^')
             if len(parts) >= 3:
-                rows.append([int(parts[0]), parts[1], parts[2]])
+                pid = int(parts[0])
+                rows.append([pid, parts[1], parts[2], run_counts.get(pid, 0)])
         return rows
+
+    def _program_runs_table(self, program_id: int) -> List[Dict[str, Any]]:
+        if not self._db_available() or program_id <= 0:
+            return []
+        response = self._db_query({'cmd': 'program_run_list', 'program_id': program_id})
+        if response.get('result') != 'Ok':
+            return []
+        runs: List[Dict[str, Any]] = []
+        for row in response.get('row', []):
+            stats = row.get('measurement_stats') or {}
+            elapsed_max = stats.get('elapsed_s_max')
+            runs.append({
+                'run_id': row.get('run_id'),
+                'run_index': row.get('run_index'),
+                'label': row.get('label'),
+                'started_at': row.get('started_at'),
+                'stopped_at': row.get('stopped_at') or '',
+                'status': row.get('status'),
+                'sample_count': int(stats.get('count', 0) or 0),
+                'duration_s': float(elapsed_max) if elapsed_max is not None else None,
+            })
+        return runs
 
     def _steps_table(self, program_id: int) -> List[List[Any]]:
         return [[s.step_id, s.t_start, s.t_stop, s.minutes] for s in self._get_program_steps(program_id)]
@@ -1065,6 +1159,9 @@ class WebHMINode(Node):
             if not steps:
                 return f'Program {program_id_int} has no steps.', self._experiment_banner()
             self._stop_prior_experiment(program_id_int, 'starting new program')
+            run_id, run_index, run_err = self._start_program_run_record(program_id_int)
+            if run_id is None:
+                return f'ERROR: {run_err or "could not start experiment run"}', self._experiment_banner()
             self._load_e720_config_for_program(program_id_int)
             first_target_k = float(steps[0].t_start)
             self._core_query({
@@ -1074,6 +1171,8 @@ class WebHMINode(Node):
             now = time.monotonic()
             self._experiment = ExperimentState(
                 program_id=program_id_int,
+                run_id=run_id,
+                run_index=run_index,
                 steps=steps,
                 step_index=0,
                 step_started_monotonic=None,
@@ -1085,7 +1184,10 @@ class WebHMINode(Node):
             self._last_measurement_log_monotonic = 0.0
             total_min = total_program_duration_s(steps) / 60.0
             self._log(f'Started program {program_id_int} ({len(steps)} steps, ~{total_min:.1f} min)')
-            return f'Program {program_id_int} started (status Running).', self._experiment_banner()
+            return (
+                f'Program {program_id_int} started — experiment {program_id_int}.{run_index} '
+                f'(status Running).'
+            ), self._experiment_banner()
         except Exception as exc:
             return f'ERROR: {exc}', self._experiment_banner()
 
@@ -1098,6 +1200,7 @@ class WebHMINode(Node):
             return f'Program {program_id_int} stopped.', self._experiment_banner()
         if self._db_available():
             self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Stopped'})
+            self._finish_program_runs_for_program(program_id_int, 'Stopped')
         self._halt_temperature_control('stop requested from program view')
         return f'Program {program_id_int} marked Stopped.', self._experiment_banner()
 
@@ -1106,6 +1209,8 @@ class WebHMINode(Node):
             exp = self._experiment
             exp_copy = ExperimentState(
                 program_id=exp.program_id,
+                run_id=exp.run_id,
+                run_index=exp.run_index,
                 steps=list(exp.steps),
                 step_index=exp.step_index,
                 step_started_monotonic=exp.step_started_monotonic,
@@ -1125,6 +1230,13 @@ class WebHMINode(Node):
             'mode': mode,
             'banner': self._experiment_banner(),
             'program_id': exp_copy.program_id,
+            'run_id': exp_copy.run_id,
+            'run_index': exp_copy.run_index,
+            'run_label': (
+                f'{exp_copy.program_id}.{exp_copy.run_index}'
+                if exp_copy.program_id is not None and exp_copy.run_index is not None
+                else None
+            ),
             'program_status': 'Running' if exp_copy.program_id is not None else None,
             'timing': timing,
             'core': {
@@ -1145,6 +1257,8 @@ class WebHMINode(Node):
             return f'Program {program_id} stopped.', self._experiment_banner()
         self._halt_temperature_control('stop from experiment page')
         stopped_ids = self._mark_programs_stopped_in_db()
+        for pid in stopped_ids:
+            self._finish_program_runs_for_program(pid, 'Stopped')
         if stopped_ids:
             return (
                 f'Control stopped. Marked Stopped in database: {stopped_ids}.',
@@ -1344,6 +1458,7 @@ class WebHMINode(Node):
         return {
             'banner': status['banner'],
             'experiment_mode': status['mode'],
+            'run_label': status.get('run_label'),
             'timing': status['timing'],
             'ltm_summary': self._ltm_temperature_summary(),
             'measurements': self._measurements_table(),
@@ -1594,7 +1709,7 @@ class WebHMINode(Node):
                 'summary': 'Select a program on the list first.',
                 'steps': [],
                 'e720_json': '{}',
-                'stats_json': '{}',
+                'program_runs': [],
                 'message': 'Select a program first.',
                 'db_status': '',
                 'is_running_here': False,
@@ -1608,7 +1723,7 @@ class WebHMINode(Node):
                     'summary': f'Program {pid}',
                     'steps': [],
                     'e720_json': '{}',
-                    'stats_json': '{}',
+                    'program_runs': [],
                     'message': detail.get('error', 'not found'),
                     'db_status': '',
                     'is_running_here': False,
@@ -1625,16 +1740,23 @@ class WebHMINode(Node):
                 f"- **Description:** {desc}\n"
                 f"- **Temperature steps:** {len(steps)}\n"
             )
-            stats = row.get('measurement_stats') or {}
             db_status = str(row.get('status') or 'New')
+            program_runs = self._program_runs_table(pid)
             with self._lock:
                 active_id = self._experiment.program_id
+                active_run_id = self._experiment.run_id
             is_running_here = active_id is not None and int(active_id) == pid
+            for run in program_runs:
+                run['is_active'] = (
+                    is_running_here
+                    and active_run_id is not None
+                    and int(run.get('run_id', 0)) == int(active_run_id)
+                )
             return {
                 'summary': summary,
                 'steps': steps,
                 'e720_json': json.dumps(row.get('e720') or {}, indent=2, default=str),
-                'stats_json': json.dumps(stats, indent=2, default=str),
+                'program_runs': program_runs,
                 'message': f'Loaded program {pid}.',
                 'db_status': db_status,
                 'is_running_here': is_running_here,
@@ -1646,7 +1768,7 @@ class WebHMINode(Node):
                 'summary': f'Program {pid}',
                 'steps': [],
                 'e720_json': '{}',
-                'stats_json': '{}',
+                'program_runs': [],
                 'message': f'ERROR: {exc}',
                 'db_status': '',
                 'is_running_here': False,

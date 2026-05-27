@@ -98,7 +98,9 @@
     if (modeEl) {
       const mode = data.experiment_mode || 'idle';
       const labels = { idle: 'Idle', program_running: 'Program running', stabilize: 'Stabilize (manual)' };
-      modeEl.textContent = labels[mode] ? `Mode: ${labels[mode]}` : '';
+      let text = labels[mode] ? `Mode: ${labels[mode]}` : '';
+      if (data.run_label) text += ` — experiment ${data.run_label}`;
+      modeEl.textContent = text;
     }
     const ltm = document.getElementById('ltm-summary');
     if (ltm) ltm.textContent = data.ltm_summary || '';

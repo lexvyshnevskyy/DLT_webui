@@ -16,6 +16,8 @@ class ProgramStep:
 @dataclass
 class ExperimentState:
     program_id: Optional[int] = None
+    run_id: Optional[int] = None
+    run_index: Optional[int] = None
     steps: List[ProgramStep] = field(default_factory=list)
     step_index: int = 0
     step_started_monotonic: Optional[float] = None

@@ -34,6 +34,7 @@ def export_program_archive(
     steps_resp = db_query({'cmd': 'program_step_list', 'id': program_id})
     measurements_resp = db_query({'cmd': 'measurement_list', 'program_id': program_id, 'limit': limit})
     stats_resp = db_query({'cmd': 'measurement_stats', 'program_id': program_id})
+    runs_resp = db_query({'cmd': 'program_run_list', 'program_id': program_id})
     e720_resp = db_query({'cmd': 'get_e720', 'id': program_id})
 
     meta = {
@@ -42,6 +43,7 @@ def export_program_archive(
         'program': program_info,
         'e720_config': e720_resp.get('row', {}),
         'measurement_stats': stats_resp.get('row', stats_resp),
+        'experiment_runs': runs_resp.get('row', []),
     }
     (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
 
@@ -79,6 +81,24 @@ def export_program_archive(
         work_dir / 'measurements.csv',
         ['id', 'elapsed_s', 'freq', 'measure_ch1', 'measure_ch2', 't_ch1', 't_ch2', 't_exp', 'created_at'],
         measurement_rows,
+    )
+
+    run_rows: List[List[Any]] = []
+    for run in runs_resp.get('row', []):
+        stats = run.get('measurement_stats') or {}
+        run_rows.append([
+            run.get('label', ''),
+            run.get('run_id', ''),
+            run.get('run_index', ''),
+            run.get('started_at', ''),
+            run.get('stopped_at', ''),
+            run.get('status', ''),
+            stats.get('count', 0),
+        ])
+    _write_csv(
+        work_dir / 'experiment_runs.csv',
+        ['label', 'run_id', 'run_index', 'started_at', 'stopped_at', 'status', 'sample_count'],
+        run_rows,
     )
 
     zip_path = export_root / f'program_{program_id}_{stamp}.zip'

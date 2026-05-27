@@ -4,9 +4,6 @@
 <div class="page-head">
   <h1>Program {{ program_id }}</h1>
   <div class="page-head-actions">
-    <a class="btn" href="/programs">← Programs</a>
-    <a class="btn" href="/experiment">← {{ _('nav.experiment') }}</a>
-    <a class="btn" href="/program-edit?id={{ program_id }}">Edit program</a>
     {% if can_run %}
     <form method="post" action="/program-view/run" class="inline">
       <input type="hidden" name="id" value="{{ program_id }}">
@@ -19,7 +16,9 @@
       <button type="submit" class="btn danger">{{ _('program_view.stop') }}</button>
     </form>
     {% endif %}
-
+    <a href="/programs">← Programs</a>
+    <a class="btn" href="/program-edit?id={{ program_id }}">Edit</a>
+    <a class="btn" href="/experiment">{{ _('nav.experiment') }}</a>
   </div>
 </div>
 
@@ -51,7 +50,33 @@
 </section>
 
 <section class="card">
-  <h2>Measurement stats</h2>
-  <pre class="mono">{{ stats_json }}</pre>
+  <h2>{{ _('program_view.measurements_title') }}</h2>
+  <p class="muted">{{ _('program_view.measurements_hint') }}</p>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>{{ _('program_view.run_label') }}</th>
+        <th>{{ _('program_view.run_started') }}</th>
+        <th>{{ _('program_view.run_stopped') }}</th>
+        <th>{{ _('common.status') }}</th>
+        <th>{{ _('program_view.run_samples') }}</th>
+        <th>{{ _('program_view.run_duration') }}</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for run in program_runs %}
+      <tr class="{% if run.is_active %}ok{% endif %}">
+        <td><strong>{{ run.label }}</strong>{% if run.is_active %} <span class="ok">({{ _('program_view.active_now') }})</span>{% endif %}</td>
+        <td>{{ run.started_at }}</td>
+        <td>{{ run.stopped_at or '—' }}</td>
+        <td>{{ run.status }}</td>
+        <td>{{ run.sample_count }}</td>
+        <td>{% if run.duration_s is not none %}{{ '%.1f'|format(run.duration_s) }} s{% else %}—{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6">{{ _('program_view.no_runs') }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
 </section>
 {% endblock %}

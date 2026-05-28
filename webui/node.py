@@ -6,12 +6,14 @@ import tempfile
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import rclpy
 from database.srv import Query as DatabaseQuery
 from msgs.msg import Ads, E720, Measurement
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String, UInt8
@@ -27,11 +29,24 @@ from webui.experiment_runner import (
     ExperimentState,
     ProgramStep,
     experiment_timing,
-    total_program_duration_s,
 )
 from webui.export_data import export_program_archive
-from webui.measurement_log import build_measurement_row, insert_measurement
+from webui.measurement_log import build_measurement_row, insert_measurements_bulk
 from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
+
+_MEASUREMENT_QUEUE_STOP = object()
+
+
+@dataclass
+class _PendingServiceCall:
+    client: Any
+    request_type: Any
+    service_name: str
+    payload: Dict[str, Any]
+    timeout_sec: float
+    done: threading.Event
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[BaseException] = None
 from webui.system_config import (
     get_configuration_snapshot,
     read_env_file,
@@ -61,6 +76,7 @@ class WebHMINode(Node):
         super().__init__('webui')
 
         self.declare_parameter('core_service', '/core/query')
+        self.declare_parameter('experiment_status_topic', '/core/experiment/status')
         self.declare_parameter('database_service', '/database/query')
         self.declare_parameter('measurement_topic', '/ltm2985/measurement')
         self.declare_parameter('measure_topic', '/measure_device')
@@ -81,6 +97,10 @@ class WebHMINode(Node):
         self.declare_parameter('network_use_sudo', True)
         self.declare_parameter('enable_measurement_logging', True)
         self.declare_parameter('measurement_log_e720_max_age_sec', 1.0)
+        self.declare_parameter('measurement_bulk_size', 12)
+        self.declare_parameter('measurement_bulk_flush_sec', 0.25)
+        self.declare_parameter('ros_service_timeout_sec', 15.0)
+        self.declare_parameter('core_service_timeout_sec', 3.0)
         self.declare_parameter('measurement_log_control_channel', 9)
         self.declare_parameter('measurement_log_monitor_channel', 3)
         self.declare_parameter('ltm_raw_topic', '/ltm2985/raw_json')
@@ -91,6 +111,7 @@ class WebHMINode(Node):
         self.declare_parameter('systemd_units', DEFAULT_SYSTEMD_UNITS)
 
         self.core_service = str(self.get_parameter('core_service').value)
+        self.experiment_status_topic = str(self.get_parameter('experiment_status_topic').value)
         self.database_service = str(self.get_parameter('database_service').value)
         self.measurement_topic = str(self.get_parameter('measurement_topic').value)
         self.measure_topic = str(self.get_parameter('measure_topic').value)
@@ -111,6 +132,21 @@ class WebHMINode(Node):
         self.measurement_log_e720_max_age_sec = max(
             0.1,
             float(self.get_parameter('measurement_log_e720_max_age_sec').value),
+        )
+        self.measurement_bulk_size = max(1, int(self.get_parameter('measurement_bulk_size').value))
+        self.measurement_bulk_flush_sec = max(
+            0.1,
+            float(self.get_parameter('measurement_bulk_flush_sec').value),
+        )
+        self.ros_service_timeout_sec = max(2.0, float(self.get_parameter('ros_service_timeout_sec').value))
+        self.core_service_timeout_sec = max(1.0, float(self.get_parameter('core_service_timeout_sec').value))
+        self._ros_executor_thread_id: Optional[int] = None
+        self._pending_service_calls: queue.Queue = queue.Queue(maxsize=128)
+        self._dispatch_cb_group = ReentrantCallbackGroup()
+        self._service_dispatch_timer = self.create_timer(
+            0.01,
+            self._dispatch_pending_service_calls,
+            callback_group=self._dispatch_cb_group,
         )
         self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
         self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
@@ -133,18 +169,29 @@ class WebHMINode(Node):
             else list(DEFAULT_SYSTEMD_UNITS)
         )
 
-        self.core_client = self.create_client(CoreQuery, self.core_service)
-        self.db_client = self.create_client(DatabaseQuery, self.database_service)
+        self._service_cb_group = self._dispatch_cb_group
+        self.core_client = self.create_client(
+            CoreQuery,
+            self.core_service,
+            callback_group=self._service_cb_group,
+        )
+        self.db_client = self.create_client(
+            DatabaseQuery,
+            self.database_service,
+            callback_group=self._service_cb_group,
+        )
         self._e720_cmd_pub = self.create_publisher(UInt8, self.measure_command_topic, 10)
         stream_len = max(10, self.stream_max_lines)
         self.create_subscription(Measurement, self.measurement_topic, self._on_measurement, 100)
         self.create_subscription(E720, self.measure_topic, self._on_e720, 10)
         self.create_subscription(String, self.ltm_raw_topic, self._on_ltm_raw, 20)
         self.create_subscription(Ads, self.ads_topic, self._on_ads, 10)
+        self.create_subscription(String, self.experiment_status_topic, self._on_core_experiment_status, 10)
 
-        self._runner = ExperimentRunner()
         self._sweep = E720SweepController()
         self._experiment = ExperimentState()
+        self._core_program_status: Dict[str, Any] = {}
+        self._program_was_running: bool = False
 
         self._lock = threading.RLock()
         self._programs_nav_program_id = 0
@@ -167,12 +214,6 @@ class WebHMINode(Node):
         self._log_lines: Deque[str] = deque(maxlen=300)
         self._last_service_log_time: Dict[str, float] = {}
         self._measurement_insert_queue: queue.Queue = queue.Queue(maxsize=2000)
-        if self.enable_measurement_logging:
-            threading.Thread(
-                target=self._measurement_insert_worker,
-                daemon=True,
-                name='measurement-insert',
-            ).start()
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
         self._log('webui node started')
 
@@ -209,19 +250,6 @@ class WebHMINode(Node):
             }
             if 'temperature' in mtype.lower():
                 self._ltm_stream.appendleft(line)
-        if (
-            ch == self.log_control_channel
-            and 'temperature' in mtype.lower()
-            and valid
-        ):
-            self._try_log_measurement_on_ltm()
-
-    def _try_log_measurement_on_ltm(self) -> None:
-        with self._lock:
-            if self._experiment.program_id is None or self._experiment.run_id is None:
-                return
-            target_k = self._experiment.last_target_k
-        self._maybe_log_measurement(target_k)
 
     def _on_e720(self, msg: E720) -> None:
         data = e720_from_msg(msg)
@@ -244,34 +272,146 @@ class WebHMINode(Node):
         with self._lock:
             self._latest_ads = msg
 
-    def _call_service_json(
+    def _on_core_experiment_status(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data or '{}')
+        except json.JSONDecodeError:
+            return
+        program = payload.get('program') or {}
+        tc = payload.get('temperature_control')
+        ended: Optional[Tuple[int, int]] = None
+        with self._lock:
+            prev_pid = self._core_program_status.get('program_id')
+            prev_run = self._core_program_status.get('run_id')
+            self._core_program_status = dict(program)
+            if tc is not None:
+                snap = dict(self._last_core_snapshot)
+                snap['temperature_control'] = tc
+                snap['program'] = program
+                self._last_core_snapshot = snap
+            new_pid = program.get('program_id')
+            new_run = program.get('run_id')
+            if new_pid is not None:
+                self._experiment.program_id = int(new_pid)
+                self._experiment.run_id = int(new_run) if new_run is not None else None
+                self._experiment.run_index = program.get('run_index')
+                self._experiment.last_target_k = program.get('last_target_k')
+                self._experiment.status = str(program.get('status') or 'Running')
+            elif prev_pid is not None:
+                self._experiment = ExperimentState()
+                if prev_run is not None:
+                    ended = (int(prev_pid), int(prev_run))
+        if ended is not None:
+            pid, rid = ended
+            self._schedule_run_charts(rid, pid)
+
+    def _is_program_running(self) -> bool:
+        with self._lock:
+            return self._core_program_status.get('program_id') is not None
+
+    def _on_ros_executor_thread(self) -> bool:
+        tid = self._ros_executor_thread_id
+        return tid is not None and threading.get_ident() == tid
+
+    def _call_service_json_on_executor(
         self,
         client: Any,
         request_type: Any,
         service_name: str,
         payload: Dict[str, Any],
-        timeout_sec: float = 5.0,
+        timeout_sec: float,
     ) -> Dict[str, Any]:
-        if not client.wait_for_service(timeout_sec=timeout_sec):
-            raise RuntimeError(f'Service is not available: {service_name}')
+        if not client.service_is_ready():
+            if not client.wait_for_service(timeout_sec=min(1.0, float(timeout_sec))):
+                raise RuntimeError(f'Service is not available: {service_name}')
         request = request_type()
         request.query = json.dumps(payload)
         future = client.call_async(request)
-        deadline = time.monotonic() + timeout_sec
-        while time.monotonic() < deadline:
-            if future.done():
-                response = future.result()
-                if response is None:
-                    raise RuntimeError(f'Service call failed: {service_name}')
-                return json.loads(response.response or '{}')
-            time.sleep(0.02)
-        raise TimeoutError(f'Timeout waiting for {service_name}')
+        rclpy.spin_until_future_complete(self, future, timeout_sec=float(timeout_sec))
+        if not future.done():
+            raise TimeoutError(f'Timeout waiting for {service_name}')
+        response = future.result()
+        if response is None:
+            raise RuntimeError(f'Service call failed: {service_name}')
+        return json.loads(response.response or '{}')
 
-    def _db_query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._call_service_json(self.db_client, DatabaseQuery.Request, self.database_service, payload)
+    def _dispatch_pending_service_calls(self) -> None:
+        processed = 0
+        while processed < 32:
+            try:
+                pending = self._pending_service_calls.get_nowait()
+            except queue.Empty:
+                break
+            processed += 1
+            try:
+                pending.result = self._call_service_json_on_executor(
+                    pending.client,
+                    pending.request_type,
+                    pending.service_name,
+                    pending.payload,
+                    pending.timeout_sec,
+                )
+            except BaseException as exc:
+                pending.error = exc
+            finally:
+                pending.done.set()
+
+    def _invoke_service_json(
+        self,
+        client: Any,
+        request_type: Any,
+        service_name: str,
+        payload: Dict[str, Any],
+        timeout_sec: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if timeout_sec is None:
+            timeout_sec = self.ros_service_timeout_sec
+        if self._on_ros_executor_thread():
+            return self._call_service_json_on_executor(
+                client,
+                request_type,
+                service_name,
+                payload,
+                float(timeout_sec),
+            )
+        pending = _PendingServiceCall(
+            client=client,
+            request_type=request_type,
+            service_name=service_name,
+            payload=payload,
+            timeout_sec=float(timeout_sec),
+            done=threading.Event(),
+        )
+        try:
+            self._pending_service_calls.put_nowait(pending)
+        except queue.Full:
+            raise RuntimeError(f'Service call queue full ({service_name})')
+        wait_sec = float(timeout_sec) + 2.0
+        if not pending.done.wait(timeout=wait_sec):
+            raise TimeoutError(f'Timeout waiting for {service_name}')
+        if pending.error is not None:
+            raise pending.error
+        if pending.result is None:
+            raise RuntimeError(f'Service call failed: {service_name}')
+        return pending.result
+
+    def _db_query(self, payload: Dict[str, Any], *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
+        return self._invoke_service_json(
+            self.db_client,
+            DatabaseQuery.Request,
+            self.database_service,
+            payload,
+            timeout_sec=timeout_sec,
+        )
 
     def _core_query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        result = self._call_service_json(self.core_client, CoreQuery.Request, self.core_service, payload)
+        result = self._invoke_service_json(
+            self.core_client,
+            CoreQuery.Request,
+            self.core_service,
+            payload,
+            timeout_sec=self.core_service_timeout_sec,
+        )
         with self._lock:
             self._last_core_snapshot = result
         return result
@@ -339,28 +479,59 @@ class WebHMINode(Node):
         msg.data = int(byte_val) & 0xFF
         self._e720_cmd_pub.publish(msg)
 
+    def _flush_measurement_batch(self, batch: List[Dict[str, Any]]) -> None:
+        if not batch:
+            return
+        if not self._db_available():
+            return
+        if not insert_measurements_bulk(
+            lambda payload: self._db_query(payload, timeout_sec=self.ros_service_timeout_sec),
+            batch,
+        ):
+            self._log_throttled('measurement_log', f'measurement_bulk_insert failed ({len(batch)} rows)')
+
     def _measurement_insert_worker(self) -> None:
+        batch: List[Dict[str, Any]] = []
+        last_flush = time.monotonic()
         while True:
-            row = self._measurement_insert_queue.get()
-            if row is None:
-                return
             try:
-                if not self._db_available():
-                    continue
-                if not insert_measurement(self._db_query, row):
-                    self._log_throttled('measurement_log', 'measurement_insert rejected by database')
+                row = self._measurement_insert_queue.get(timeout=self.measurement_bulk_flush_sec)
+            except queue.Empty:
+                if batch:
+                    try:
+                        self._flush_measurement_batch(batch)
+                    except Exception as exc:
+                        self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
+                    batch = []
+                    last_flush = time.monotonic()
+                continue
+            if row is _MEASUREMENT_QUEUE_STOP:
+                self._measurement_insert_queue.task_done()
+                break
+            batch.append(row)
+            self._measurement_insert_queue.task_done()
+            now = time.monotonic()
+            if len(batch) >= self.measurement_bulk_size or (now - last_flush) >= self.measurement_bulk_flush_sec:
+                try:
+                    self._flush_measurement_batch(batch)
+                except Exception as exc:
+                    self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
+                batch = []
+                last_flush = now
+        if batch:
+            try:
+                self._flush_measurement_batch(batch)
             except Exception as exc:
                 self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
-            finally:
-                self._measurement_insert_queue.task_done()
 
     def _maybe_log_measurement(self, target_k: Optional[float]) -> None:
         """Store one row per LTM control-channel temperature sample (target ~3–4/s)."""
         if not self.enable_measurement_logging:
             return
         with self._lock:
-            program_id = self._experiment.program_id
-            run_id = self._experiment.run_id
+            prog = self._core_program_status
+            program_id = prog.get('program_id')
+            run_id = prog.get('run_id')
             e720_msg = self._latest_e720
             e720_updated = self._latest_e720_monotonic
             temps = dict(self._latest_measurements)
@@ -399,27 +570,6 @@ class WebHMINode(Node):
             return None, None, 'program run start returned no run_id'
         return run_id, run_index, ''
 
-    def _finish_program_run_record(self, run_id: Optional[int], final_status: str) -> None:
-        if not self._db_available() or run_id is None or int(run_id) <= 0:
-            return
-        program_id: Optional[int] = None
-        try:
-            detail = self._db_query({'cmd': 'program_run_get', 'run_id': int(run_id)})
-            if detail.get('result') == 'Ok':
-                program_id = int((detail.get('row') or {}).get('program_id', 0) or 0)
-        except Exception:
-            program_id = None
-        try:
-            self._db_query({
-                'cmd': 'program_run_finish',
-                'run_id': int(run_id),
-                'status': final_status,
-            })
-        except Exception as exc:
-            self._log(f'Failed to finish program run {run_id}: {exc}')
-        if program_id and program_id > 0:
-            self._schedule_run_charts(int(run_id), program_id)
-
     def _schedule_run_charts(self, run_id: int, program_id: int) -> None:
         def _worker() -> None:
             try:
@@ -446,10 +596,8 @@ class WebHMINode(Node):
         program_id_int = int(program_id)
         run_id_int = int(run_id)
         with self._lock:
-            if (
-                self._experiment.run_id is not None
-                and int(self._experiment.run_id) == run_id_int
-            ):
+            active_run = self._core_program_status.get('run_id')
+            if active_run is not None and int(active_run) == run_id_int:
                 return 'Stop the experiment before deleting this run.'
         try:
             detail = self._db_query({'cmd': 'program_run_get', 'run_id': run_id_int})
@@ -543,30 +691,19 @@ class WebHMINode(Node):
     def _control_tick(self) -> None:
         try:
             with self._lock:
-                running = self._experiment.program_id is not None
+                running = self._core_program_status.get('program_id') is not None
                 e720_data = e720_from_msg(self._latest_e720)
+                was_running = self._program_was_running
+                self._program_was_running = running
+
+            if was_running and not running:
+                self._sweep.reset()
 
             if running:
                 sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
                 cmd = sweep_result.get('command_byte')
                 if cmd is not None:
                     self._publish_e720_byte(int(cmd))
-
-            action = self._runner.tick(self._experiment)
-            if not action.get('active'):
-                if action.get('finished'):
-                    self._finish_active_program('Finished')
-                return
-
-            target_k = action.get('target_k')
-            if target_k is not None:
-                self._core_query({'temperature_control': {'enabled': True, 'target_k': float(target_k)}})
-                self._experiment.last_target_k = float(target_k)
-                if action.get('step_started') or action.get('advanced_step'):
-                    pid = self._experiment.program_id
-                    step = self._experiment.step_index + 1
-                    total = len(self._experiment.steps)
-                    self._log(f'Program {pid}: step {step}/{total}, target {target_k:.2f} K')
         except Exception as exc:
             self._log(f'Control loop error: {exc}')
 
@@ -605,50 +742,22 @@ class WebHMINode(Node):
             self._log(f'Failed to stop running programs in DB: {exc}')
         return stopped
 
-    def _stop_prior_experiment(self, new_program_id: int, reason: str) -> None:
-        """Stop in-memory experiment, DB running rows, and core stabilize before a new run."""
-        with self._lock:
-            previous_id = self._experiment.program_id
-        if previous_id is not None and int(previous_id) != int(new_program_id):
-            self._finish_active_program('Stopped')
-        elif previous_id is not None:
-            self._halt_temperature_control('restarting program')
-        else:
-            self._halt_temperature_control(reason)
-
-        stopped_ids = self._mark_programs_stopped_in_db(except_program_id=new_program_id)
-        if stopped_ids:
-            self._log(f'Marked Stopped in DB: programs {stopped_ids}')
-
-    def _finish_active_program(self, final_status: str) -> None:
-        program_id = self._experiment.program_id
-        run_id = self._experiment.run_id
-        if program_id is None:
-            self._halt_temperature_control('no active program')
-            return
-        self._halt_temperature_control('program ended')
-        self._finish_program_run_record(run_id, final_status)
-        try:
-            self._db_query({'cmd': 'program_update_status', 'id': program_id, 'status': final_status})
-        except Exception as exc:
-            self._log(f'Failed to update program status: {exc}')
-        self._experiment = ExperimentState()
-        self._sweep.reset()
-        self._log(f'Program {program_id} ended: {final_status}')
-
     def _experiment_banner(self) -> str:
-        exp = self._experiment
-        if exp.program_id is None:
-            return f'Idle — last status: {exp.status}'
-        step = exp.step_index + 1
-        total = len(exp.steps)
-        target = exp.last_target_k
+        prog = self._core_program_status
+        program_id = prog.get('program_id')
+        if program_id is None:
+            return 'Idle — no program running in core'
+        timing = prog.get('timing') or {}
+        step = timing.get('step_index', '?')
+        total = timing.get('step_count', '?')
+        target = prog.get('last_target_k')
         mode = SWEEP_MODE_LABELS.get(self._sweep.config.mode, 'unknown')
+        label = prog.get('run_label') or program_id
         return (
-            f'RUNNING program {exp.program_id} — step {step}/{total}, '
+            f'RUNNING {label} — step {step}/{total}, '
             f'target {target:.2f} K, E7-20 mode: {mode}'
             if target is not None
-            else f'RUNNING program {exp.program_id} — step {step}/{total}, E7-20 mode: {mode}'
+            else f'RUNNING {label} — step {step}/{total}, E7-20 mode: {mode}'
         )
 
     def _is_ltm_temperature(self, item: Dict[str, Any]) -> bool:
@@ -1296,94 +1405,68 @@ class WebHMINode(Node):
             return f'ERROR: {exc}'
 
     def ui_start_program(self, program_id: float) -> Tuple[str, str]:
-        if not self._db_available():
-            return self._database_unavailable_message(), self._experiment_banner()
         if not self._core_available():
             return self._core_unavailable_message(), self._experiment_banner()
         program_id_int = int(program_id)
         try:
-            steps = self._get_program_steps(program_id_int)
-            if not steps:
-                return f'Program {program_id_int} has no steps.', self._experiment_banner()
-            self._stop_prior_experiment(program_id_int, 'starting new program')
-            run_id, run_index, run_err = self._start_program_run_record(program_id_int)
-            if run_id is None:
-                return f'ERROR: {run_err or "could not start experiment run"}', self._experiment_banner()
             self._load_e720_config_for_program(program_id_int)
-            first_target_k = float(steps[0].t_start)
-            self._core_query({
-                'temperature_control': {'enabled': True, 'target_k': first_target_k, 'reset_integral': True},
+            response = self._core_query({
+                'program': {'cmd': 'start', 'program_id': program_id_int},
             })
-            self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Running'})
-            now = time.monotonic()
-            self._experiment = ExperimentState(
-                program_id=program_id_int,
-                run_id=run_id,
-                run_index=run_index,
-                steps=steps,
-                step_index=0,
-                step_started_monotonic=None,
-                started_monotonic=now,
-                status='Running',
-                last_target_k=first_target_k,
-            )
+            if str(response.get('result', '')).lower() not in ('ok', 'true'):
+                return f'ERROR: {response.get("error", "core rejected start")}', self._experiment_banner()
+            prog = response.get('program') or {}
+            with self._lock:
+                self._core_program_status = dict(prog)
+                self._program_was_running = True
             self._sweep.reset()
-            total_min = total_program_duration_s(steps) / 60.0
-            self._log(f'Started program {program_id_int} ({len(steps)} steps, ~{total_min:.1f} min)')
-            return (
-                f'Program {program_id_int} started — experiment {program_id_int}.{run_index} '
-                f'(status Running).'
-            ), self._experiment_banner()
+            run_index = prog.get('run_index')
+            label = prog.get('run_label') or f'{program_id_int}.{run_index or "?"}'
+            self._log(f'Core started program {program_id_int} ({label})')
+            return f'Program {program_id_int} started — experiment {label}.', self._experiment_banner()
         except Exception as exc:
             return f'ERROR: {exc}', self._experiment_banner()
 
     def ui_stop_program_by_id(self, program_id: float) -> Tuple[str, str]:
+        if not self._core_available():
+            return self._core_unavailable_message(), self._experiment_banner()
         program_id_int = int(program_id)
-        with self._lock:
-            active = self._experiment.program_id
-        if active is not None and int(active) == program_id_int:
-            self._finish_active_program('Stopped')
+        try:
+            response = self._core_query({
+                'program': {'cmd': 'stop', 'program_id': program_id_int},
+            })
+            if str(response.get('result', '')).lower() not in ('ok', 'true'):
+                return f'ERROR: {response.get("error", "stop failed")}', self._experiment_banner()
+            self._sweep.reset()
             return f'Program {program_id_int} stopped.', self._experiment_banner()
-        if self._db_available():
-            self._db_query({'cmd': 'program_update_status', 'id': program_id_int, 'status': 'Stopped'})
-            self._finish_program_runs_for_program(program_id_int, 'Stopped')
-        self._halt_temperature_control('stop requested from program view')
-        return f'Program {program_id_int} marked Stopped.', self._experiment_banner()
+        except Exception as exc:
+            return f'ERROR: {exc}', self._experiment_banner()
 
     def get_experiment_status(self) -> Dict[str, Any]:
+        if self._core_available():
+            try:
+                response = self._core_query({'program': {'cmd': 'status'}})
+                if str(response.get('result', '')).lower() in ('ok', 'true'):
+                    with self._lock:
+                        self._core_program_status = dict(response.get('program') or {})
+            except Exception:
+                pass
         with self._lock:
-            exp = self._experiment
-            exp_copy = ExperimentState(
-                program_id=exp.program_id,
-                run_id=exp.run_id,
-                run_index=exp.run_index,
-                steps=list(exp.steps),
-                step_index=exp.step_index,
-                step_started_monotonic=exp.step_started_monotonic,
-                started_monotonic=exp.started_monotonic,
-                status=exp.status,
-                last_target_k=exp.last_target_k,
-            )
+            prog = dict(self._core_program_status)
             core = dict(self._last_core_snapshot.get('temperature_control') or {})
-        timing = experiment_timing(exp_copy)
-        mode = 'idle'
-        if exp_copy.program_id is not None:
-            mode = 'program_running'
-        elif core.get('enabled'):
+        timing = prog.get('timing') or experiment_timing(ExperimentState())
+        mode = str(prog.get('mode') or 'idle')
+        if mode == 'idle' and core.get('enabled'):
             mode = 'stabilize'
-
+        program_id = prog.get('program_id')
         return {
             'mode': mode,
             'banner': self._experiment_banner(),
-            'program_id': exp_copy.program_id,
-            'run_id': exp_copy.run_id,
-            'run_index': exp_copy.run_index,
-            'run_label': (
-                f'{exp_copy.program_id}.{exp_copy.run_index}'
-                if exp_copy.program_id is not None and exp_copy.run_index is not None
-                else None
-            ),
-            'program_status': 'Running' if exp_copy.program_id is not None else None,
+            'program_id': program_id,
+            'run_id': prog.get('run_id'),
+            'run_index': prog.get('run_index'),
+            'run_label': prog.get('run_label'),
+            'program_status': 'Running' if program_id is not None else None,
             'timing': timing,
             'core': {
                 'enabled': bool(core.get('enabled')),
@@ -1395,33 +1478,27 @@ class WebHMINode(Node):
         }
 
     def ui_stop_program(self) -> Tuple[str, str]:
-        with self._lock:
-            program_id = self._experiment.program_id
-        if program_id is not None:
-            self._finish_active_program('Stopped')
-            self._mark_programs_stopped_in_db()
-            return f'Program {program_id} stopped.', self._experiment_banner()
-        self._halt_temperature_control('stop from experiment page')
-        stopped_ids = self._mark_programs_stopped_in_db()
-        for pid in stopped_ids:
-            self._finish_program_runs_for_program(pid, 'Stopped')
-        if stopped_ids:
-            return (
-                f'Control stopped. Marked Stopped in database: {stopped_ids}.',
-                self._experiment_banner(),
-            )
-        return 'No active program. Control disabled.', self._experiment_banner()
+        if not self._core_available():
+            return self._core_unavailable_message(), self._experiment_banner()
+        try:
+            with self._lock:
+                program_id = self._core_program_status.get('program_id')
+            response = self._core_query({'program': {'cmd': 'stop_all'}})
+            if str(response.get('result', '')).lower() not in ('ok', 'true'):
+                return f'ERROR: {response.get("error", "stop failed")}', self._experiment_banner()
+            self._sweep.reset()
+            if program_id is not None:
+                return f'Program {program_id} stopped.', self._experiment_banner()
+            return 'No active program. Control disabled.', self._experiment_banner()
+        except Exception as exc:
+            return f'ERROR: {exc}', self._experiment_banner()
 
     def _current_theoretical_temp_k(self) -> Optional[float]:
         """Program ramp target or manual/core setpoint for experiment chart agenda."""
         with self._lock:
-            exp = self._experiment
-            if exp.program_id is not None and exp.steps and exp.step_index < len(exp.steps):
-                step = exp.steps[exp.step_index]
-                if exp.step_started_monotonic is not None:
-                    elapsed = max(0.0, time.monotonic() - float(exp.step_started_monotonic))
-                    return float(ExperimentRunner.interpolate_target(step, elapsed))
-                return float(step.t_start)
+            prog = self._core_program_status
+            if prog.get('program_id') is not None and prog.get('last_target_k') is not None:
+                return float(prog['last_target_k'])
             core = dict(self._last_core_snapshot.get('temperature_control') or {})
             if core.get('enabled'):
                 return float(core.get('target_k', 0))
@@ -1431,10 +1508,11 @@ class WebHMINode(Node):
         if not self._core_available():
             return self._core_unavailable_message()
         if enabled:
-            with self._lock:
-                if self._experiment.program_id is not None:
-                    self._finish_active_program('Stopped')
-            self._mark_programs_stopped_in_db()
+            try:
+                self._core_query({'program': {'cmd': 'stop_all'}})
+            except Exception:
+                pass
+            self._sweep.reset()
         tc_payload: Dict[str, Any] = {
             'enabled': bool(enabled),
             'target_k': float(target_k),
@@ -2158,13 +2236,23 @@ class WebHMINode(Node):
         uvicorn.run(app, host=self.bind_host, port=self.bind_port, log_level='info')
 
 
+def _executor_spin(executor: MultiThreadedExecutor, node: WebHMINode) -> None:
+    node._ros_executor_thread_id = threading.get_ident()
+    executor.spin()
+
+
 def main(args: Optional[List[str]] = None) -> None:
     rclpy.init(args=args)
     node = WebHMINode()
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
-    thread = threading.Thread(target=executor.spin, daemon=True)
+    thread = threading.Thread(target=_executor_spin, args=(executor, node), daemon=True)
     thread.start()
+    # Allow executor thread to start before uvicorn issues service calls from another thread.
+    for _ in range(50):
+        if node._ros_executor_thread_id is not None:
+            break
+        time.sleep(0.02)
     try:
         node.launch_web()
     except KeyboardInterrupt:

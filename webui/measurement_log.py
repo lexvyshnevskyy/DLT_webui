@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 DbQueryFn = Callable[[Dict[str, Any]], Dict[str, Any]]
 
@@ -63,3 +63,10 @@ def build_measurement_row(
 def insert_measurement(db_query: DbQueryFn, row: Dict[str, Any]) -> bool:
     response = db_query({'cmd': 'measurement_insert', **row})
     return str(response.get('result', '')).lower() == 'ok' and int(response.get('ID', 0) or 0) > 0
+
+
+def insert_measurements_bulk(db_query: DbQueryFn, rows: List[Dict[str, Any]]) -> bool:
+    if not rows:
+        return True
+    response = db_query({'cmd': 'measurement_bulk_insert', 'rows': rows})
+    return str(response.get('result', '')).lower() == 'ok'

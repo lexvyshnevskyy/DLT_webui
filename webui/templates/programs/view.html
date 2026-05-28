@@ -61,22 +61,36 @@
         <th>{{ _('common.status') }}</th>
         <th>{{ _('program_view.run_samples') }}</th>
         <th>{{ _('program_view.run_duration') }}</th>
+        <th>{{ _('common.actions') }}</th>
       </tr>
     </thead>
     <tbody>
     {% for run in program_runs %}
-      <tr class="{% if run.is_active %}ok{% endif %}">
+      <tr class="clickable-row {% if run.is_active %}ok{% endif %}"
+          data-href="/program-run?program_id={{ program_id }}&run_id={{ run.run_id }}">
         <td><strong>{{ run.label }}</strong>{% if run.is_active %} <span class="ok">({{ _('program_view.active_now') }})</span>{% endif %}</td>
         <td>{{ run.started_at }}</td>
         <td>{{ run.stopped_at or '—' }}</td>
         <td>{{ run.status }}</td>
         <td>{{ run.sample_count }}</td>
         <td>{% if run.duration_s is not none %}{{ '%.1f'|format(run.duration_s) }} s{% else %}—{% endif %}</td>
+        <td class="actions no-row-nav">
+          <form method="post" action="/program-view/run/delete" class="inline"
+                data-confirm-msg="{{ _('program_run.delete_confirm', label=run.label) }}"
+                onsubmit="return confirm(this.getAttribute('data-confirm-msg'));">
+            <input type="hidden" name="program_id" value="{{ program_id }}">
+            <input type="hidden" name="run_id" value="{{ run.run_id }}">
+            <button type="submit" class="danger">{{ _('common.delete') }}</button>
+          </form>
+        </td>
       </tr>
     {% else %}
-      <tr><td colspan="6">{{ _('program_view.no_runs') }}</td></tr>
+      <tr><td colspan="7">{{ _('program_view.no_runs') }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/program_run.js" defer></script>
 {% endblock %}

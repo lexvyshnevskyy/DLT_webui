@@ -77,6 +77,48 @@ body {
 .card h2 { margin-top: 0; font-size: 1.1rem; }
 
 .experiment-status-actions { margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+
+tr.clickable-row { cursor: pointer; }
+tr.clickable-row:hover td { background: rgba(61, 139, 253, 0.08); }
+tr.clickable-row .no-row-nav { cursor: default; }
+
+.run-info-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 1.25rem;
+  margin: 0;
+}
+.run-info-grid dt { color: var(--muted); margin: 0; }
+.run-info-grid dd { margin: 0; }
+
+.run-chart-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0a0e14;
+}
+
+.tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+.tab-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 0.35rem 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tab-btn.active, .tab-btn:hover { color: var(--text); border-color: var(--accent); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.meas-load-hint { margin-top: 0.5rem; font-size: 0.9rem; }
 .vpn-panel { margin: 0.75rem 0; }
 .vpn-form .form-row { flex-wrap: wrap; align-items: flex-end; }
 span.ok { color: var(--ok); }

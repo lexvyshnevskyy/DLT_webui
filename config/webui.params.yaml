@@ -15,6 +15,7 @@ webui:
     status_refresh_period_sec: 1.0
     control_loop_period_sec: 1.0
     measurement_log_min_interval_sec: 0.25
+    run_charts_dir: ''
     enable_measurement_logging: true
     measurement_log_control_channel: 9
     measurement_log_monitor_channel: 3

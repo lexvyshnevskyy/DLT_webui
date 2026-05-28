@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% set active = 'programs' %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ _('program_run.title', label=run.label) }}</h1>
+  <div class="page-head-actions">
+    <a href="/program-view?id={{ program_id }}">← {{ _('program_run.back_program') }}</a>
+    <a class="btn" href="/programs">{{ _('programs.title') }}</a>
+  </div>
+</div>
+
+<section class="card">
+  <h2>{{ _('program_run.info') }}</h2>
+  <dl class="run-info-grid">
+    <dt>{{ _('program_run.run_label') }}</dt><dd><strong>{{ run.label }}</strong></dd>
+    <dt>{{ _('program_view.run_started') }}</dt><dd>{{ run.started_at }}</dd>
+    <dt>{{ _('program_view.run_stopped') }}</dt><dd>{{ run.stopped_at or '—' }}</dd>
+    <dt>{{ _('common.status') }}</dt><dd>{{ run.status }}{% if is_active %} <span class="ok">({{ _('program_view.active_now') }})</span>{% endif %}</dd>
+    <dt>{{ _('program_view.run_samples') }}</dt><dd>{{ sample_count }}</dd>
+  </dl>
+</section>
+
+<section class="card">
+  <h2>{{ _('program_run.temp_chart') }}</h2>
+  {% if temperature_chart_url %}
+  <img class="run-chart-img" src="{{ temperature_chart_url }}" alt="{{ _('program_run.temp_chart') }}">
+  {% elif is_active %}
+  <p class="muted">{{ _('program_run.charts_after_stop') }}</p>
+  {% else %}
+  <p class="muted">{{ _('program_run.charts_missing') }}</p>
+  <form method="post" action="/program-run/regenerate-charts" class="inline">
+    <input type="hidden" name="program_id" value="{{ program_id }}">
+    <input type="hidden" name="run_id" value="{{ run_id }}">
+    <button type="submit" class="btn">{{ _('program_run.regenerate_charts') }}</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card" id="freq-charts-section">
+  <h2>{{ _('program_run.e720_charts') }}</h2>
+  {% if freq_tabs %}
+  <div class="tab-bar" role="tablist">
+    {% for tab in freq_tabs %}
+    <button type="button" class="tab-btn{% if loop.first %} active{% endif %}" role="tab"
+            data-tab="freq-tab-{{ loop.index }}" aria-selected="{{ 'true' if loop.first else 'false' }}">
+      {{ tab.label }}
+    </button>
+    {% endfor %}
+  </div>
+  {% for tab in freq_tabs %}
+  <div class="tab-panel{% if loop.first %} active{% endif %}" id="freq-tab-{{ loop.index }}" role="tabpanel">
+    {% if tab.chart_url %}
+    <img class="run-chart-img" src="{{ tab.chart_url }}" alt="{{ tab.label }}">
+    {% else %}
+    <p class="muted">{{ _('program_run.charts_missing') }}</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="muted">{{ _('program_run.no_freq_data') }}</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>{{ _('program_run.measurements_table') }}</h2>
+  <div id="run-meas-meta" class="muted"
+       data-api="/api/program-run/measurements"
+       data-program-id="{{ program_id }}"
+       data-run-id="{{ run_id }}"></div>
+  <table class="data" id="run-meas-table">
+    <thead>
+      <tr>
+        <th>elapsed_s</th>
+        <th>freq</th>
+        <th>measure_ch1</th>
+        <th>measure_ch2</th>
+        <th>t_ch1</th>
+        <th>t_ch2</th>
+        <th>t_exp</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="run-meas-load-more" class="muted meas-load-hint">{{ _('program_run.scroll_more') }}</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/program_run.js" defer></script>
+{% endblock %}

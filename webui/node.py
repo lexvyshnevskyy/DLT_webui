@@ -30,6 +30,7 @@ from webui.experiment_runner import (
 )
 from webui.export_data import export_program_archive
 from webui.measurement_log import build_measurement_row, insert_measurement
+from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
 from webui.system_config import (
     get_configuration_snapshot,
     read_env_file,
@@ -74,6 +75,7 @@ class WebHMINode(Node):
         self.declare_parameter('control_loop_period_sec', 1.0)
         self.declare_parameter('delatometry_env_file', '/etc/default/delatometry')
         self.declare_parameter('export_dir', '')
+        self.declare_parameter('run_charts_dir', '')
         self.declare_parameter('enable_service_control', True)
         self.declare_parameter('network_use_sudo', True)
         self.declare_parameter('enable_measurement_logging', True)
@@ -119,6 +121,9 @@ class WebHMINode(Node):
 
         export_dir = str(self.get_parameter('export_dir').value).strip()
         self.export_dir = export_dir or str(Path(tempfile.gettempdir()) / 'delatometry_exports')
+        charts_dir = str(self.get_parameter('run_charts_dir').value).strip()
+        self.run_charts_dir = charts_dir or str(Path(tempfile.gettempdir()) / 'delatometry_run_charts')
+        Path(self.run_charts_dir).mkdir(parents=True, exist_ok=True)
 
         units_param = self.get_parameter('systemd_units').value
         self.systemd_units = (
@@ -401,6 +406,13 @@ class WebHMINode(Node):
     def _finish_program_run_record(self, run_id: Optional[int], final_status: str) -> None:
         if not self._db_available() or run_id is None or int(run_id) <= 0:
             return
+        program_id: Optional[int] = None
+        try:
+            detail = self._db_query({'cmd': 'program_run_get', 'run_id': int(run_id)})
+            if detail.get('result') == 'Ok':
+                program_id = int((detail.get('row') or {}).get('program_id', 0) or 0)
+        except Exception:
+            program_id = None
         try:
             self._db_query({
                 'cmd': 'program_run_finish',
@@ -409,6 +421,116 @@ class WebHMINode(Node):
             })
         except Exception as exc:
             self._log(f'Failed to finish program run {run_id}: {exc}')
+        if program_id and program_id > 0:
+            self._schedule_run_charts(int(run_id), program_id)
+
+    def _schedule_run_charts(self, run_id: int, program_id: int) -> None:
+        def _worker() -> None:
+            try:
+                result = generate_run_charts(self._db_query, self.run_charts_dir, run_id, program_id)
+                if result.get('ok'):
+                    self._log(f'Charts saved for run {program_id}.{run_id}: {result.get("charts", [])}')
+                else:
+                    self._log(f'Chart generation for run {run_id}: {result.get("error", "failed")}')
+            except Exception as exc:
+                self._log(f'Chart generation for run {run_id} failed: {exc}')
+
+        threading.Thread(target=_worker, daemon=True, name=f'run-charts-{run_id}').start()
+
+    def run_chart_file_path(self, program_id: int, run_id: int, name: str) -> Optional[Path]:
+        safe = Path(name).name
+        if safe != name or '..' in name:
+            return None
+        path = run_chart_dir(Path(self.run_charts_dir), program_id, run_id) / safe
+        return path if path.is_file() else None
+
+    def ui_delete_program_run(self, program_id: int, run_id: int) -> str:
+        if not self._db_available():
+            return self._database_unavailable_message()
+        program_id_int = int(program_id)
+        run_id_int = int(run_id)
+        with self._lock:
+            if (
+                self._experiment.run_id is not None
+                and int(self._experiment.run_id) == run_id_int
+            ):
+                return 'Stop the experiment before deleting this run.'
+        try:
+            detail = self._db_query({'cmd': 'program_run_get', 'run_id': run_id_int})
+            if detail.get('result') != 'Ok':
+                return 'Experiment run not found.'
+            row = detail.get('row') or {}
+            if int(row.get('program_id', 0)) != program_id_int:
+                return 'Run does not belong to this program.'
+            delete_run_charts(self.run_charts_dir, program_id_int, run_id_int)
+            response = self._db_query({'cmd': 'program_run_delete', 'run_id': run_id_int})
+            if response.get('result') != 'Ok':
+                return f'ERROR: {response.get("error", "delete failed")}'
+            self._log(f'Deleted experiment run {row.get("label", run_id_int)}')
+            return f'Deleted experiment {row.get("label", run_id_int)} and all measurements.'
+        except Exception as exc:
+            return f'ERROR: {exc}'
+
+    def program_run_view_fields(self, program_id: int, run_id: int) -> Dict[str, Any]:
+        pid = int(program_id or 0)
+        rid = int(run_id or 0)
+        empty: Dict[str, Any] = {
+            'run': {},
+            'temperature_chart_url': None,
+            'freq_tabs': [],
+            'charts_ready': False,
+            'message': 'Invalid run.',
+        }
+        if not self._db_available() or pid <= 0 or rid <= 0:
+            return empty
+        try:
+            detail = self._db_query({'cmd': 'program_run_get', 'run_id': rid})
+            if detail.get('result') != 'Ok':
+                empty['message'] = detail.get('error', 'not found')
+                return empty
+            run = detail.get('row') or {}
+            if int(run.get('program_id', 0)) != pid:
+                empty['message'] = 'Run does not belong to this program.'
+                return empty
+            chart_base = f'/program-run/chart?program_id={pid}&run_id={rid}&name='
+            chart_dir = run_chart_dir(Path(self.run_charts_dir), pid, rid)
+            temp_name = 'temperature.png'
+            temp_path = chart_dir / temp_name
+            temperature_chart_url = chart_base + temp_name if temp_path.is_file() else None
+            freqs_resp = self._db_query({'cmd': 'measurement_run_frequencies', 'run_id': rid})
+            freqs = freqs_resp.get('row', []) if freqs_resp.get('result') == 'Ok' else []
+            freq_tabs: List[Dict[str, Any]] = []
+            for freq in freqs:
+                value = float(freq)
+                fname = freq_chart_filename(value)
+                chart_url = chart_base + fname if (chart_dir / fname).is_file() else None
+                if abs(value) < 1e-9:
+                    label = 'E7-20 offline (0 Hz)'
+                else:
+                    label = f'{value:g} Hz'
+                freq_tabs.append({
+                    'freq': value,
+                    'label': label,
+                    'chart_url': chart_url,
+                    'filename': fname,
+                })
+            stats = run.get('measurement_stats') or {}
+            with self._lock:
+                active_run = self._experiment.run_id
+            is_active = active_run is not None and int(active_run) == rid
+            charts_ready = temperature_chart_url is not None or any(t.get('chart_url') for t in freq_tabs)
+            return {
+                'run': run,
+                'temperature_chart_url': temperature_chart_url,
+                'freq_tabs': freq_tabs,
+                'charts_ready': charts_ready,
+                'is_active': is_active,
+                'sample_count': int(stats.get('count', 0) or 0),
+                'message': f'Experiment {run.get("label", rid)}.',
+            }
+        except Exception as exc:
+            empty['message'] = f'ERROR: {exc}'
+            return empty
 
     def _finish_program_runs_for_program(self, program_id: int, final_status: str = 'Stopped') -> None:
         if not self._db_available():

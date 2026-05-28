@@ -155,6 +155,89 @@ async def program_view_stop(request: Request, id: int = Form(...)) -> RedirectRe
     return RedirectResponse(url=f'/program-view?id={id}&msg={quote(banner)}', status_code=303)
 
 
+@router.post('/program-view/run/delete')
+async def program_view_run_delete(
+    request: Request,
+    program_id: int = Form(...),
+    run_id: int = Form(...),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    msg = node.ui_delete_program_run(program_id, run_id)
+    return RedirectResponse(url=f'/program-view?id={program_id}&msg={quote(msg)}', status_code=303)
+
+
+@router.get('/program-run', response_class=HTMLResponse)
+async def program_run_view(
+    request: Request,
+    program_id: int = Query(0),
+    run_id: int = Query(0),
+    msg: str = Query(''),
+) -> HTMLResponse:
+    templates, node = _tpl(request)
+    fields = node.program_run_view_fields(program_id, run_id)
+    return template_response(
+        templates,
+        request,
+        'programs/run_view.html',
+        {
+            'title': node.title,
+            'program_id': program_id,
+            'run_id': run_id,
+            'message': msg or fields.get('message', ''),
+            **fields,
+        },
+    )
+
+
+@router.get('/program-run/chart')
+async def program_run_chart(
+    request: Request,
+    program_id: int = Query(...),
+    run_id: int = Query(...),
+    name: str = Query(...),
+):
+    _, node = _tpl(request)
+    path = node.run_chart_file_path(program_id, run_id, name)
+    if path is None:
+        return RedirectResponse(url=f'/program-run?program_id={program_id}&run_id={run_id}', status_code=303)
+    return FileResponse(path, media_type='image/png')
+
+
+@router.post('/program-run/regenerate-charts')
+async def program_run_regenerate_charts(
+    request: Request,
+    program_id: int = Form(...),
+    run_id: int = Form(...),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    node._schedule_run_charts(int(run_id), int(program_id))
+    return RedirectResponse(
+        url=f'/program-run?program_id={program_id}&run_id={run_id}&msg=Chart+generation+started',
+        status_code=303,
+    )
+
+
+@router.get('/api/program-run/measurements')
+async def program_run_measurements_api(
+    request: Request,
+    run_id: int = Query(...),
+    program_id: int = Query(0),
+    offset: int = Query(0),
+    limit: int = Query(100),
+) -> JSONResponse:
+    _, node = _tpl(request)
+    if not node._db_available():
+        return JSONResponse({'result': 'False', 'row': [], 'total': 0, 'error': 'database unavailable'})
+    response = node._db_query({
+        'cmd': 'measurement_list_page',
+        'run_id': run_id,
+        'program_id': program_id,
+        'offset': max(0, offset),
+        'limit': min(500, max(1, limit)),
+    })
+    return JSONResponse(response)
+
+
 @router.get('/program-edit', response_class=HTMLResponse)
 async def program_edit_form(request: Request, id: int = Query(0), msg: str = Query('')) -> HTMLResponse:
     templates, node = _tpl(request)

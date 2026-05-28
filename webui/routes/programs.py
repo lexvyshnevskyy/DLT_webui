@@ -161,6 +161,22 @@ async def program_view_stop(request: Request, id: int = Form(...)) -> RedirectRe
     return RedirectResponse(url=f'/program-view?id={id}&msg={quote(msg)}', status_code=303)
 
 
+@router.get('/program-view/export')
+async def program_view_export(
+    request: Request,
+    program_id: int = Query(...),
+    run_id: int = Query(...),
+):
+    _, node = _tpl(request)
+    path, msg = node.ui_export_program_run(program_id, run_id)
+    if not path:
+        return RedirectResponse(
+            url=f'/program-view?id={program_id}&msg={quote(msg or "Export failed")}',
+            status_code=303,
+        )
+    return FileResponse(path, filename=path.split('/')[-1], media_type='application/zip')
+
+
 @router.post('/program-view/run/delete')
 async def program_view_run_delete(
     request: Request,

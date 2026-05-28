@@ -75,6 +75,7 @@
         <td>{{ run.sample_count }}</td>
         <td>{% if run.duration_s is not none %}{{ '%.1f'|format(run.duration_s) }} s{% else %}—{% endif %}</td>
         <td class="actions no-row-nav">
+          <a class="btn" href="/program-view/export?program_id={{ program_id }}&run_id={{ run.run_id }}">{{ _('program_view.export_run') }}</a>
           <form method="post" action="/program-view/run/delete" class="inline"
                 data-confirm-msg="{{ _('program_run.delete_confirm', label=run.label) }}"
                 onsubmit="return confirm(this.getAttribute('data-confirm-msg'));">

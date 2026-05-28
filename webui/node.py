@@ -30,7 +30,7 @@ from webui.experiment_runner import (
     ProgramStep,
     experiment_timing,
 )
-from webui.export_data import export_program_archive
+from webui.export_data import export_program_archive, export_run_archive
 from webui.measurement_log import build_measurement_row, insert_measurements_bulk
 from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
 
@@ -1678,12 +1678,20 @@ class WebHMINode(Node):
         try:
             if clear_first:
                 self._db_query({'cmd': 'measurement_delete_by_program_id', 'program_id': program_id_int})
-            result = export_program_archive(self._db_query, program_id_int, self.export_dir, limit=int(limit))
+            result = export_program_archive(
+                self._db_query,
+                program_id_int,
+                self.export_dir,
+                limit=int(limit),
+                charts_root=self.run_charts_dir,
+            )
             if not result.get('ok'):
                 return None, result.get('error', 'export failed')
             self._log(f'Exported program {program_id_int} -> {result["zip_path"]}')
+            charts_note = f', {len(result.get("chart_files", []))} chart(s)' if result.get('chart_files') else ''
             return result['zip_path'], (
-                f'Export OK: {result["measurement_count"]} measurements, {result["step_count"]} steps.'
+                f'Export OK: {result["measurement_count"]} measurements in '
+                f'{result.get("run_count", 0)} run file(s), {result["step_count"]} steps{charts_note}.'
             )
         except Exception as exc:
             return None, f'ERROR: {exc}'
@@ -1993,13 +2001,47 @@ class WebHMINode(Node):
         if pid <= 0:
             return None, 'Select a program to export.'
         try:
-            result = export_program_archive(self._db_query, pid, self.export_dir, limit=50000)
+            result = export_program_archive(
+                self._db_query,
+                pid,
+                self.export_dir,
+                limit=50000,
+                charts_root=self.run_charts_dir,
+            )
             if not result.get('ok'):
                 return None, result.get('error', 'export failed')
             self._log(f'Exported program {pid} -> {result["zip_path"]}')
+            charts_note = f', {len(result.get("chart_files", []))} chart(s)' if result.get('chart_files') else ''
             return result['zip_path'], (
-                f'Export ready: {result["measurement_count"]} measurements, '
-                f'{result["step_count"]} steps.'
+                f'Export ready: {result["measurement_count"]} measurements in '
+                f'{result.get("run_count", 0)} run file(s), {result["step_count"]} steps{charts_note}.'
+            )
+        except Exception as exc:
+            return None, f'ERROR: {exc}'
+
+    def ui_export_program_run(self, program_id: int, run_id: int) -> Tuple[Optional[str], str]:
+        pid = int(program_id or 0)
+        rid = int(run_id or 0)
+        if not self._db_available():
+            return None, self._database_unavailable_message()
+        if pid <= 0 or rid <= 0:
+            return None, 'Invalid program or run.'
+        try:
+            result = export_run_archive(
+                self._db_query,
+                pid,
+                rid,
+                self.export_dir,
+                limit=50000,
+                charts_root=self.run_charts_dir,
+            )
+            if not result.get('ok'):
+                return None, result.get('error', 'export failed')
+            label = result.get('run_label', f'{pid}.{rid}')
+            self._log(f'Exported run {label} -> {result["zip_path"]}')
+            charts_note = f', {len(result.get("chart_files", []))} chart(s)' if result.get('chart_files') else ''
+            return result['zip_path'], (
+                f'Export ready: run {label}, {result["measurement_count"]} measurement(s){charts_note}.'
             )
         except Exception as exc:
             return None, f'ERROR: {exc}'

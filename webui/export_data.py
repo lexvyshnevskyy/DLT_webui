@@ -2,11 +2,29 @@ from __future__ import annotations
 
 import csv
 import json
+import re
+import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+
+from webui.run_charts import _load_run_measurements, run_chart_dir
 
 DbQueryFn = Callable[[Dict[str, Any]], Dict[str, Any]]
+
+MEASUREMENT_HEADERS = [
+    'id',
+    'program_id',
+    'run_id',
+    'elapsed_s',
+    'freq',
+    'measure_ch1',
+    'measure_ch2',
+    't_ch1',
+    't_ch2',
+    't_exp',
+    'created_at',
+]
 
 
 def _write_csv(path: Path, headers: List[str], rows: List[List[Any]]) -> None:
@@ -16,37 +34,42 @@ def _write_csv(path: Path, headers: List[str], rows: List[List[Any]]) -> None:
         writer.writerows(rows)
 
 
-def export_program_archive(
-    db_query: DbQueryFn,
-    program_id: int,
-    export_dir: str,
-    limit: int = 100000,
-) -> Dict[str, Any]:
-    import zipfile
+def _label_slug(label: str, *, program_id: int, run_index: int) -> str:
+    text = str(label or '').strip() or f'{program_id}.{run_index}'
+    slug = re.sub(r'[^\w.\-]+', '_', text)
+    return slug or f'{program_id}.{run_index}'
 
-    export_root = Path(export_dir)
-    export_root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    work_dir = export_root / f'program_{program_id}_{stamp}'
-    work_dir.mkdir(parents=True, exist_ok=True)
 
-    program_info = db_query({'cmd': 'get_program_by_id', 'id': program_id})
-    steps_resp = db_query({'cmd': 'program_step_list', 'id': program_id})
-    measurements_resp = db_query({'cmd': 'measurement_list', 'program_id': program_id, 'limit': limit})
-    stats_resp = db_query({'cmd': 'measurement_stats', 'program_id': program_id})
-    runs_resp = db_query({'cmd': 'program_run_list', 'program_id': program_id})
-    e720_resp = db_query({'cmd': 'get_e720', 'id': program_id})
+def _measurement_rows_to_csv(measurements: List[Dict[str, Any]]) -> List[List[Any]]:
+    return [
+        [
+            row.get('id', ''),
+            row.get('program_id', ''),
+            row.get('run_id', ''),
+            row.get('elapsed_s', ''),
+            row.get('freq', ''),
+            row.get('measure_ch1', ''),
+            row.get('measure_ch2', ''),
+            row.get('t_ch1', ''),
+            row.get('t_ch2', ''),
+            row.get('t_exp', ''),
+            row.get('created_at', ''),
+        ]
+        for row in measurements
+    ]
 
-    meta = {
-        'program_id': program_id,
-        'exported_at': datetime.now().isoformat(),
-        'program': program_info,
-        'e720_config': e720_resp.get('row', {}),
-        'measurement_stats': stats_resp.get('row', stats_resp),
-        'experiment_runs': runs_resp.get('row', []),
-    }
-    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
 
+def _write_program_steps_csv(work_dir: Path, steps_resp: Dict[str, Any]) -> int:
+    step_rows: List[List[Any]] = []
+    for raw_row in steps_resp.get('row', []):
+        parts = str(raw_row).split('^')
+        if len(parts) >= 4:
+            step_rows.append(parts[:4])
+    _write_csv(work_dir / 'program_steps.csv', ['step_id', 't_start_k', 't_stop_k', 'minutes'], step_rows)
+    return len(step_rows)
+
+
+def _write_program_csv(work_dir: Path, program_info: Dict[str, Any]) -> None:
     if program_info.get('result') == 'Ok' and program_info.get('row'):
         parts = str(program_info['row']).split('^')
         if len(parts) >= 3:
@@ -56,33 +79,8 @@ def export_program_archive(
                 [[parts[0], parts[1], parts[2]]],
             )
 
-    step_rows: List[List[Any]] = []
-    for raw_row in steps_resp.get('row', []):
-        parts = str(raw_row).split('^')
-        if len(parts) >= 4:
-            step_rows.append(parts[:4])
-    _write_csv(work_dir / 'program_steps.csv', ['step_id', 't_start_k', 't_stop_k', 'minutes'], step_rows)
 
-    measurement_rows: List[List[Any]] = []
-    for row in measurements_resp.get('row', []):
-        if isinstance(row, dict):
-            measurement_rows.append([
-                row.get('id', ''),
-                row.get('elapsed_s', ''),
-                row.get('freq', ''),
-                row.get('measure_ch1', ''),
-                row.get('measure_ch2', ''),
-                row.get('t_ch1', ''),
-                row.get('t_ch2', ''),
-                row.get('t_exp', ''),
-                row.get('created_at', ''),
-            ])
-    _write_csv(
-        work_dir / 'measurements.csv',
-        ['id', 'elapsed_s', 'freq', 'measure_ch1', 'measure_ch2', 't_ch1', 't_ch2', 't_exp', 'created_at'],
-        measurement_rows,
-    )
-
+def _write_experiment_runs_csv(work_dir: Path, runs_resp: Dict[str, Any]) -> None:
     run_rows: List[List[Any]] = []
     for run in runs_resp.get('row', []):
         stats = run.get('measurement_stats') or {}
@@ -101,15 +99,207 @@ def export_program_archive(
         run_rows,
     )
 
-    zip_path = export_root / f'program_{program_id}_{stamp}.zip'
-    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        for file_path in work_dir.iterdir():
-            archive.write(file_path, arcname=file_path.name)
 
+def _copy_run_charts(
+    work_dir: Path,
+    charts_root: Optional[str | Path],
+    program_id: int,
+    run_id: int,
+    slug: str,
+) -> List[str]:
+    if not charts_root:
+        return []
+    src = run_chart_dir(Path(charts_root), program_id, run_id)
+    if not src.is_dir():
+        return []
+    dest = work_dir / 'charts' / slug
+    dest.mkdir(parents=True, exist_ok=True)
+    copied: List[str] = []
+    for png in sorted(src.glob('*.png')):
+        target = dest / png.name
+        shutil.copy2(png, target)
+        copied.append(str(target.relative_to(work_dir)))
+    return copied
+
+
+def _export_runs_measurements(
+    db_query: DbQueryFn,
+    work_dir: Path,
+    program_id: int,
+    runs: List[Dict[str, Any]],
+    *,
+    charts_root: Optional[str | Path],
+    limit: int,
+    only_run_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    total_measurements = 0
+    chart_files: List[str] = []
+    for run in runs:
+        run_id = int(run.get('run_id', 0) or 0)
+        if run_id <= 0:
+            continue
+        if only_run_id is not None and run_id != int(only_run_id):
+            continue
+        run_index = int(run.get('run_index', 0) or 0)
+        label = str(run.get('label') or f'{program_id}.{run_index}')
+        slug = _label_slug(label, program_id=program_id, run_index=run_index)
+        measurements = _load_run_measurements(db_query, run_id, program_id)
+        if limit > 0 and len(measurements) > limit:
+            measurements = measurements[:limit]
+        csv_name = f'measurements_{slug}.csv'
+        _write_csv(work_dir / csv_name, MEASUREMENT_HEADERS, _measurement_rows_to_csv(measurements))
+        total_measurements += len(measurements)
+        chart_files.extend(_copy_run_charts(work_dir, charts_root, program_id, run_id, slug))
+    return {'measurement_count': total_measurements, 'chart_files': chart_files}
+
+
+def _finalize_zip(work_dir: Path, export_root: Path, zip_basename: str) -> str:
+    zip_path = export_root / zip_basename
+    import zipfile
+
+    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_path in sorted(work_dir.rglob('*')):
+            if file_path.is_file():
+                archive.write(file_path, arcname=file_path.relative_to(work_dir).as_posix())
+    shutil.rmtree(work_dir, ignore_errors=True)
+    return str(zip_path)
+
+
+def export_program_archive(
+    db_query: DbQueryFn,
+    program_id: int,
+    export_dir: str,
+    limit: int = 100000,
+    *,
+    charts_root: Optional[str | Path] = None,
+) -> Dict[str, Any]:
+    export_root = Path(export_dir)
+    export_root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    work_dir = export_root / f'program_{program_id}_{stamp}'
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    program_info = db_query({'cmd': 'get_program_by_id', 'id': program_id})
+    detail_resp = db_query({'cmd': 'get_program_detail', 'id': program_id})
+    steps_resp = db_query({'cmd': 'program_step_list', 'id': program_id})
+    stats_resp = db_query({'cmd': 'measurement_stats', 'program_id': program_id})
+    runs_resp = db_query({'cmd': 'program_run_list', 'program_id': program_id})
+    e720_resp = db_query({'cmd': 'get_e720', 'id': program_id})
+
+    program_detail = detail_resp.get('row', {}) if detail_resp.get('result') == 'Ok' else {}
+    runs = runs_resp.get('row', []) if runs_resp.get('result') == 'Ok' else []
+
+    meta = {
+        'program_id': program_id,
+        'exported_at': datetime.now().isoformat(),
+        'export_scope': 'program_all_runs',
+        'program': program_info,
+        'program_detail': program_detail,
+        'e720_config': e720_resp.get('row', {}),
+        'measurement_stats': stats_resp.get('row', stats_resp),
+        'experiment_runs': runs,
+    }
+    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
+
+    _write_program_csv(work_dir, program_info)
+    step_count = _write_program_steps_csv(work_dir, steps_resp)
+    _write_experiment_runs_csv(work_dir, runs_resp)
+
+    per_run = _export_runs_measurements(
+        db_query,
+        work_dir,
+        program_id,
+        runs,
+        charts_root=charts_root,
+        limit=limit,
+    )
+
+    zip_path = _finalize_zip(work_dir, export_root, f'program_{program_id}_{stamp}.zip')
+    run_count = len(runs)
     return {
         'ok': True,
-        'zip_path': str(zip_path),
-        'measurement_count': len(measurement_rows),
-        'step_count': len(step_rows),
+        'zip_path': zip_path,
+        'measurement_count': per_run['measurement_count'],
+        'step_count': step_count,
+        'run_count': run_count,
+        'chart_files': per_run['chart_files'],
+        'error': '',
+    }
+
+
+def export_run_archive(
+    db_query: DbQueryFn,
+    program_id: int,
+    run_id: int,
+    export_dir: str,
+    limit: int = 100000,
+    *,
+    charts_root: Optional[str | Path] = None,
+) -> Dict[str, Any]:
+    export_root = Path(export_dir)
+    export_root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    run_resp = db_query({'cmd': 'program_run_get', 'run_id': int(run_id)})
+    if run_resp.get('result') != 'Ok':
+        return {'ok': False, 'error': run_resp.get('error', 'run not found')}
+    run_row = run_resp.get('row') or {}
+    if int(run_row.get('program_id', 0) or 0) != int(program_id):
+        return {'ok': False, 'error': 'run does not belong to this program'}
+
+    label = str(run_row.get('label') or f'{program_id}.{run_row.get("run_index", 0)}')
+    slug = _label_slug(label, program_id=program_id, run_index=int(run_row.get('run_index', 0) or 0))
+    work_dir = export_root / f'program_{program_id}_run_{slug}_{stamp}'
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    program_info = db_query({'cmd': 'get_program_by_id', 'id': program_id})
+    detail_resp = db_query({'cmd': 'get_program_detail', 'id': program_id})
+    steps_resp = db_query({'cmd': 'program_step_list', 'id': program_id})
+    e720_resp = db_query({'cmd': 'get_e720', 'id': program_id})
+    stats_resp = db_query({
+        'cmd': 'measurement_stats',
+        'program_id': program_id,
+        'run_id': int(run_id),
+    })
+
+    program_detail = detail_resp.get('row', {}) if detail_resp.get('result') == 'Ok' else {}
+
+    meta = {
+        'program_id': program_id,
+        'run_id': int(run_id),
+        'run_label': label,
+        'exported_at': datetime.now().isoformat(),
+        'export_scope': 'single_run',
+        'program': program_info,
+        'program_detail': program_detail,
+        'experiment_run': run_row,
+        'e720_config': e720_resp.get('row', {}),
+        'measurement_stats': stats_resp.get('row', stats_resp),
+    }
+    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
+    (work_dir / 'experiment_run.json').write_text(json.dumps(run_row, indent=2, default=str), encoding='utf-8')
+
+    _write_program_csv(work_dir, program_info)
+    step_count = _write_program_steps_csv(work_dir, steps_resp)
+
+    per_run = _export_runs_measurements(
+        db_query,
+        work_dir,
+        program_id,
+        [run_row],
+        charts_root=charts_root,
+        limit=limit,
+        only_run_id=int(run_id),
+    )
+
+    zip_path = _finalize_zip(work_dir, export_root, f'program_{program_id}_run_{slug}_{stamp}.zip')
+    return {
+        'ok': True,
+        'zip_path': zip_path,
+        'measurement_count': per_run['measurement_count'],
+        'step_count': step_count,
+        'run_count': 1,
+        'run_label': label,
+        'chart_files': per_run['chart_files'],
         'error': '',
     }

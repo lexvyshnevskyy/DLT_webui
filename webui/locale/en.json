@@ -142,6 +142,7 @@
 
   "experiment.title": "Experiment",
   "experiment.status": "Status",
+  "experiment.pwm": "PWM outputs",
   "experiment.ltm": "LTM temperature",
   "experiment.ltm_stream": "LTM stream",
   "experiment.e720": "E7-20",

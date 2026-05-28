@@ -43,6 +43,15 @@ async def experiment_status_api(request: Request) -> JSONResponse:
     return JSONResponse(node.get_experiment_status())
 
 
+@router.get('/api/experiment/snapshot')
+async def experiment_snapshot_api(request: Request) -> JSONResponse:
+    _, node = _tpl(request)
+    try:
+        return JSONResponse(node.get_experiment_snapshot())
+    except Exception as exc:
+        return JSONResponse({'error': str(exc)}, status_code=500)
+
+
 @router.post('/experiment/stop')
 async def experiment_stop(request: Request) -> RedirectResponse:
     _, node = _tpl(request)

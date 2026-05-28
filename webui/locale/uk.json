@@ -142,6 +142,7 @@
 
   "experiment.title": "Експеримент",
   "experiment.status": "Статус",
+  "experiment.pwm": "Виходи PWM",
   "experiment.ltm": "Температура LTM",
   "experiment.ltm_stream": "Потік LTM",
   "experiment.e720": "E7-20",

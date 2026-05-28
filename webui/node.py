@@ -298,16 +298,19 @@ class WebHMINode(Node):
             return
         program = payload.get('program') or {}
         tc = payload.get('temperature_control')
+        pwm = payload.get('pwm')
         ended: Optional[Tuple[int, int]] = None
         with self._lock:
             prev_pid = self._core_program_status.get('program_id')
             prev_run = self._core_program_status.get('run_id')
             self._core_program_status = dict(program)
+            snap = dict(self._last_core_snapshot)
+            snap['program'] = program
             if tc is not None:
-                snap = dict(self._last_core_snapshot)
                 snap['temperature_control'] = tc
-                snap['program'] = program
-                self._last_core_snapshot = snap
+            if pwm is not None:
+                snap['pwm'] = pwm
+            self._last_core_snapshot = snap
             new_pid = program.get('program_id')
             new_run = program.get('run_id')
             if new_pid is not None:
@@ -732,8 +735,29 @@ class WebHMINode(Node):
         except Exception as exc:
             self._log(f'Failed to finish active runs for program {program_id}: {exc}')
 
+    def _refresh_core_live_state(self) -> None:
+        """Pull pwm + temperature_control from core (runs on ROS executor timer)."""
+        if not self._core_available():
+            return
+        try:
+            response = self._core_query({}, timeout_sec=min(2.0, self.core_service_timeout_sec))
+            if str(response.get('result', '')).lower() not in ('ok', 'true'):
+                return
+            with self._lock:
+                snap = dict(self._last_core_snapshot)
+                tc = response.get('temperature_control')
+                pwm = response.get('pwm')
+                if tc is not None:
+                    snap['temperature_control'] = tc
+                if pwm is not None:
+                    snap['pwm'] = pwm
+                self._last_core_snapshot = snap
+        except Exception:
+            pass
+
     def _control_tick(self) -> None:
         try:
+            self._refresh_core_live_state()
             with self._lock:
                 running = self._core_program_status.get('program_id') is not None
                 e720_data = e720_from_msg(self._latest_e720)
@@ -1574,10 +1598,13 @@ class WebHMINode(Node):
         except Exception as exc:
             return f'ERROR: {exc}', self._experiment_banner()
 
-    def get_experiment_status(self) -> Dict[str, Any]:
-        if self._core_available():
+    def get_experiment_status(self, *, refresh_core: bool = True) -> Dict[str, Any]:
+        if refresh_core and self._core_available():
             try:
-                response = self._core_query({'program': {'cmd': 'status'}})
+                response = self._core_query(
+                    {'program': {'cmd': 'status'}},
+                    timeout_sec=min(2.0, self.core_service_timeout_sec),
+                )
                 if str(response.get('result', '')).lower() in ('ok', 'true'):
                     with self._lock:
                         self._core_program_status = dict(response.get('program') or {})
@@ -1805,6 +1832,54 @@ class WebHMINode(Node):
             'hotspot_status': hotspot,
         }
 
+    def _experiment_pwm_status(self) -> Dict[str, Any]:
+        with self._lock:
+            pwm = dict(self._last_core_snapshot.get('pwm') or {})
+            tc = dict(self._last_core_snapshot.get('temperature_control') or {})
+        core_cfg = get_configuration_snapshot(self.delatometry_env_file).get('core', {})
+        pwm_enabled_cfg = bool(core_cfg.get('enable_pwm_controller'))
+        core_ok = self._core_available()
+        has_live_pwm = bool(pwm) or bool(tc)
+
+        if not core_ok:
+            return {'available': False, 'message': 'Core service unavailable'}
+        if not pwm_enabled_cfg and not has_live_pwm:
+            return {
+                'available': False,
+                'message': 'PWM disabled — enable in Configuration → Core and restart delatometry-core',
+            }
+
+        pwm_range = max(1, int(pwm.get('pwm_range') or 1000))
+        pin_ch1 = int(pwm.get('pwm_pin') or core_cfg.get('pwm_pin_ch1') or 18)
+        pin_ch2 = int(pwm.get('pwm_pin_ch2') or core_cfg.get('pwm_pin_ch2') or 19)
+        duty_ch1 = int(pwm.get('heater_pwm', tc.get('heater_output', 0)) or 0)
+        duty_ch2 = int(pwm.get('heater_pwm_ch2', duty_ch1) or 0)
+        commanded = int(tc.get('heater_output', duty_ch1) or 0)
+
+        def _channel(label: str, pin: int, duty: int) -> Dict[str, Any]:
+            duty_clamped = max(0, min(duty, pwm_range))
+            percent = round(100.0 * duty_clamped / pwm_range, 1)
+            return {
+                'label': label,
+                'pin': pin,
+                'duty': duty_clamped,
+                'percent': percent,
+                'pwm_range': pwm_range,
+            }
+
+        channels = [
+            _channel('CH1', pin_ch1, duty_ch1),
+            _channel('CH2', pin_ch2, duty_ch2),
+        ]
+        return {
+            'available': True,
+            'pwm_range': pwm_range,
+            'control_enabled': bool(tc.get('enabled')),
+            'control_reason': str(tc.get('reason') or ''),
+            'commanded_output': commanded,
+            'channels': channels,
+        }
+
     def get_experiment_snapshot(self) -> Dict[str, Any]:
         with self._lock:
             e720_msg = self._latest_e720
@@ -1818,7 +1893,7 @@ class WebHMINode(Node):
         if control and self._is_ltm_temperature(control):
             control_temp = float(control['value'])
         theoretical_temp = self._current_theoretical_temp_k()
-        status = self.get_experiment_status()
+        status = self.get_experiment_status(refresh_core=False)
         return {
             'banner': status['banner'],
             'experiment_mode': status['mode'],
@@ -1834,6 +1909,7 @@ class WebHMINode(Node):
             'theoretical_temp': theoretical_temp,
             'control_enabled': bool(core.get('enabled')),
             'heater_output': core.get('heater_output'),
+            'pwm_status': self._experiment_pwm_status(),
         }
 
     def clear_new_program_draft(self) -> None:

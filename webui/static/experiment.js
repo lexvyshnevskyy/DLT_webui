@@ -79,8 +79,78 @@
     });
   }
 
+  function pwmFromHeaterOutput(data) {
+    const out = data.heater_output;
+    if (out == null || Number.isNaN(Number(out))) return null;
+    const pwmRange = 1000;
+    const duty = Math.max(0, Math.min(pwmRange, Number(out)));
+    const percent = Math.round((1000 * duty) / pwmRange) / 10;
+    const ch = (label, pin) => ({
+      label,
+      pin,
+      duty,
+      percent,
+      pwm_range: pwmRange,
+    });
+    return {
+      available: true,
+      pwm_range: pwmRange,
+      control_enabled: Boolean(data.control_enabled),
+      control_reason: (data.core_json && data.core_json.reason) || '',
+      commanded_output: duty,
+      channels: [ch('CH1', 18), ch('CH2', 19)],
+    };
+  }
+
+  function resolvePwmStatus(data) {
+    if (data && data.pwm_status) return data.pwm_status;
+    if (data && data.heater_output != null) return pwmFromHeaterOutput(data);
+    if (data && data.core_json && data.core_json.heater_output != null) {
+      return pwmFromHeaterOutput({
+        heater_output: data.core_json.heater_output,
+        control_enabled: data.core_json.enabled,
+        core_json: data.core_json,
+      });
+    }
+    return null;
+  }
+
+  function formatPwmStatus(pwm) {
+    if (!pwm) return 'Waiting for PWM data…';
+    if (!pwm.available) {
+      return pwm.message || 'PWM not available';
+    }
+    const lines = [];
+    if (pwm.control_enabled) {
+      lines.push(
+        `Control: ON — PI output ${pwm.commanded_output} / ${pwm.pwm_range}` +
+          (pwm.control_reason ? ` (${pwm.control_reason})` : '')
+      );
+    } else {
+      lines.push('Control: OFF');
+    }
+    (pwm.channels || []).forEach((ch) => {
+      lines.push(
+        `${ch.label} GPIO ${ch.pin}: ${ch.duty} / ${ch.pwm_range} (${ch.percent}%)`
+      );
+    });
+    return lines.join('\n');
+  }
+
+  function updatePwmDisplay(data) {
+    const pwmEl = document.getElementById('pwm-status');
+    if (!pwmEl) return;
+    pwmEl.textContent = formatPwmStatus(resolvePwmStatus(data));
+  }
+
   function applySnapshot(data) {
-    if (!data || data.error) return;
+    if (!data) return;
+    updatePwmDisplay(data);
+    if (data.error) {
+      const banner = document.getElementById('exp-banner');
+      if (banner) banner.textContent = `Error: ${data.error}`;
+      return;
+    }
     const banner = document.getElementById('exp-banner');
     if (banner) banner.textContent = data.banner || '';
     const timingEl = document.getElementById('exp-timing');
@@ -132,6 +202,13 @@
     }
   }
 
+  function pollSnapshot() {
+    fetch('/api/experiment/snapshot', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((data) => applySnapshot(data))
+      .catch(() => {});
+  }
+
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(proto + '//' + location.host + wsPath);
@@ -151,6 +228,8 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     initChart();
+    pollSnapshot();
+    setInterval(pollSnapshot, 1000);
     connect();
   });
 })();

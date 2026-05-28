@@ -4,6 +4,9 @@
 <div class="page-head">
   <h1>Program {{ program_id }}</h1>
   <div class="page-head-actions">
+    <a class="btn" href="/programs">← Programs</a>
+    <a class="btn" href="/experiment">← {{ _('nav.experiment') }}</a>
+    <a class="btn" href="/program-edit?id={{ program_id }}">Edit Program</a>
     {% if can_run %}
     <form method="post" action="/program-view/run" class="inline">
       <input type="hidden" name="id" value="{{ program_id }}">
@@ -16,9 +19,6 @@
       <button type="submit" class="btn danger">{{ _('program_view.stop') }}</button>
     </form>
     {% endif %}
-    <a href="/programs">← Programs</a>
-    <a class="btn" href="/program-edit?id={{ program_id }}">Edit</a>
-    <a class="btn" href="/experiment">{{ _('nav.experiment') }}</a>
   </div>
 </div>
 

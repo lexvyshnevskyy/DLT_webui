@@ -3,7 +3,9 @@
 {% block content %}
 <div class="page-head">
   <h1>{{ _('program_new.title') }}</h1>
-  <a href="/programs">{{ _('programs.back') }}</a>
+  <div class="page-head-actions">
+    <a class="btn" href="/programs">{{ _('programs.back') }}</a>
+  </div>
 </div>
 
 <form method="post" action="/program-new" id="program-new-form" class="program-wizard"

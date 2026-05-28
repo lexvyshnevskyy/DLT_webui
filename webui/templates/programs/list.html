@@ -3,7 +3,9 @@
 {% block content %}
 <div class="page-head">
   <h1>{{ _('programs.title') }}</h1>
-  <a class="btn primary" href="/program-new?new=1">{{ _('programs.new') }}</a>
+  <div class="page-head-actions">
+    <a class="btn primary" href="/program-new?new=1">{{ _('programs.new') }}</a>
+  </div>
 </div>
 
 <table class="data programs-table">

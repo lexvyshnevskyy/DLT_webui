@@ -19,6 +19,7 @@ sudo apt install -y \
   python3-venv \
   python3-pip \
   python3-dev \
+  python3-matplotlib \
   build-essential
 
 python3 -m venv --system-site-packages "$VENV_DIR"
@@ -48,6 +49,7 @@ fi
 
 python3 -c "import rclpy; print('rclpy OK')"
 python3 -c "import fastapi, uvicorn, jinja2; print('fastapi OK')"
+python3 -c "import matplotlib; matplotlib.use('Agg'); print('matplotlib OK')"
 python3 -c "from webui.node import main; from webui.program_steps import parse_step_field_updates; print('webui import OK')"
 
 echo

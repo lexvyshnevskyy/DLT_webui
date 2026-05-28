@@ -1,8 +1,30 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+import time
+from typing import Any, Callable, Dict, Optional, Tuple
 
 DbQueryFn = Callable[[Dict[str, Any]], Dict[str, Any]]
+
+
+def e720_measure_values(
+    e720: Optional[Dict[str, Any]],
+    *,
+    updated_monotonic: float = 0.0,
+    max_age_sec: float = 1.0,
+    now: Optional[float] = None,
+) -> Tuple[float, float, float]:
+    """Use last E7-20 sample if younger than max_age_sec, otherwise zeros."""
+    if not e720:
+        return 0.0, 0.0, 0.0
+    if now is None:
+        now = time.monotonic()
+    if updated_monotonic <= 0.0 or (now - float(updated_monotonic)) > float(max_age_sec):
+        return 0.0, 0.0, 0.0
+    return (
+        float(e720.get('frequency', 0.0) or 0.0),
+        float(e720.get('firstvalue', 0.0) or 0.0),
+        float(e720.get('secondvalue', 0.0) or 0.0),
+    )
 
 
 def build_measurement_row(
@@ -14,18 +36,16 @@ def build_measurement_row(
     target_k: Optional[float],
     *,
     run_id: Optional[int] = None,
-    e720_offline: bool = False,
+    e720_updated_monotonic: float = 0.0,
+    e720_max_age_sec: float = 1.0,
 ) -> Dict[str, Any]:
     control = temperatures.get(control_channel, {})
     monitor = temperatures.get(monitor_channel, {})
-    if e720_offline:
-        freq = 0.0
-        measure_ch1 = 0.0
-        measure_ch2 = 0.0
-    else:
-        freq = float(e720.get('frequency', 0.0) or 0.0)
-        measure_ch1 = float(e720.get('firstvalue', 0.0) or 0.0)
-        measure_ch2 = float(e720.get('secondvalue', 0.0) or 0.0)
+    freq, measure_ch1, measure_ch2 = e720_measure_values(
+        e720,
+        updated_monotonic=e720_updated_monotonic,
+        max_age_sec=e720_max_age_sec,
+    )
     row: Dict[str, Any] = {
         'program_id': program_id,
         'freq': freq,

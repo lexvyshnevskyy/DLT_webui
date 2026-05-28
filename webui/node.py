@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import tempfile
 import threading
 import time
@@ -79,7 +80,7 @@ class WebHMINode(Node):
         self.declare_parameter('enable_service_control', True)
         self.declare_parameter('network_use_sudo', True)
         self.declare_parameter('enable_measurement_logging', True)
-        self.declare_parameter('measurement_log_min_interval_sec', 0.25)
+        self.declare_parameter('measurement_log_e720_max_age_sec', 1.0)
         self.declare_parameter('measurement_log_control_channel', 9)
         self.declare_parameter('measurement_log_monitor_channel', 3)
         self.declare_parameter('ltm_raw_topic', '/ltm2985/raw_json')
@@ -107,9 +108,9 @@ class WebHMINode(Node):
         self.enable_service_control = bool(self.get_parameter('enable_service_control').value)
         self.network_use_sudo = bool(self.get_parameter('network_use_sudo').value)
         self.enable_measurement_logging = bool(self.get_parameter('enable_measurement_logging').value)
-        self.measurement_log_min_interval_sec = max(
-            0.2,
-            min(0.5, float(self.get_parameter('measurement_log_min_interval_sec').value)),
+        self.measurement_log_e720_max_age_sec = max(
+            0.1,
+            float(self.get_parameter('measurement_log_e720_max_age_sec').value),
         )
         self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
         self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
@@ -157,6 +158,7 @@ class WebHMINode(Node):
         self._last_db_test_msg = ''
         self._latest_measurements: Dict[int, Dict[str, Any]] = {}
         self._latest_e720: Optional[E720] = None
+        self._latest_e720_monotonic: float = 0.0
         self._latest_ads: Optional[Ads] = None
         self._latest_ltm_raw: Optional[str] = None
         self._ltm_stream: Deque[str] = deque(maxlen=stream_len)
@@ -164,14 +166,14 @@ class WebHMINode(Node):
         self._last_core_snapshot: Dict[str, Any] = {}
         self._log_lines: Deque[str] = deque(maxlen=300)
         self._last_service_log_time: Dict[str, float] = {}
-        self._last_measurement_log_monotonic: float = 0.0
-
-        self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
+        self._measurement_insert_queue: queue.Queue = queue.Queue(maxsize=2000)
         if self.enable_measurement_logging:
-            self._measurement_log_timer = self.create_timer(
-                self.measurement_log_min_interval_sec,
-                self._measurement_log_tick,
-            )
+            threading.Thread(
+                target=self._measurement_insert_worker,
+                daemon=True,
+                name='measurement-insert',
+            ).start()
+        self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
         self._log('webui node started')
 
     def _log(self, message: str) -> None:
@@ -207,6 +209,19 @@ class WebHMINode(Node):
             }
             if 'temperature' in mtype.lower():
                 self._ltm_stream.appendleft(line)
+        if (
+            ch == self.log_control_channel
+            and 'temperature' in mtype.lower()
+            and valid
+        ):
+            self._try_log_measurement_on_ltm()
+
+    def _try_log_measurement_on_ltm(self) -> None:
+        with self._lock:
+            if self._experiment.program_id is None or self._experiment.run_id is None:
+                return
+            target_k = self._experiment.last_target_k
+        self._maybe_log_measurement(target_k)
 
     def _on_e720(self, msg: E720) -> None:
         data = e720_from_msg(msg)
@@ -218,19 +233,8 @@ class WebHMINode(Node):
         )
         with self._lock:
             self._latest_e720 = msg
+            self._latest_e720_monotonic = time.monotonic()
             self._e720_stream.appendleft(line)
-        if not data.get('online'):
-            return
-        with self._lock:
-            if self._experiment.program_id is None or self._experiment.run_id is None:
-                return
-            target_k = self._experiment.last_target_k
-        self._maybe_log_measurement(target_k, rate_limit=False, e720_offline=False)
-
-    def _e720_is_online(self) -> bool:
-        with self._lock:
-            msg = self._latest_e720
-        return bool(e720_from_msg(msg).get('online'))
 
     def _on_ltm_raw(self, msg: String) -> None:
         with self._lock:
@@ -335,45 +339,37 @@ class WebHMINode(Node):
         msg.data = int(byte_val) & 0xFF
         self._e720_cmd_pub.publish(msg)
 
-    def _measurement_log_tick(self) -> None:
-        """When E7-20 is offline: log LTM temperatures on a timer; freq/measures are zero."""
-        if self._e720_is_online():
-            return
-        with self._lock:
-            if self._experiment.program_id is None or self._experiment.run_id is None:
+    def _measurement_insert_worker(self) -> None:
+        while True:
+            row = self._measurement_insert_queue.get()
+            if row is None:
                 return
-            target_k = self._experiment.last_target_k
-        self._maybe_log_measurement(target_k, rate_limit=True, e720_offline=True)
+            try:
+                if not self._db_available():
+                    continue
+                if not insert_measurement(self._db_query, row):
+                    self._log_throttled('measurement_log', 'measurement_insert rejected by database')
+            except Exception as exc:
+                self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
+            finally:
+                self._measurement_insert_queue.task_done()
 
-    def _maybe_log_measurement(
-        self,
-        target_k: Optional[float],
-        *,
-        rate_limit: bool = True,
-        e720_offline: bool = False,
-    ) -> None:
-        if not self.enable_measurement_logging or not self._db_available():
+    def _maybe_log_measurement(self, target_k: Optional[float]) -> None:
+        """Store one row per LTM control-channel temperature sample (target ~3–4/s)."""
+        if not self.enable_measurement_logging:
             return
         with self._lock:
             program_id = self._experiment.program_id
             run_id = self._experiment.run_id
             e720_msg = self._latest_e720
+            e720_updated = self._latest_e720_monotonic
             temps = dict(self._latest_measurements)
         if program_id is None or run_id is None:
             return
         control = temps.get(self.log_control_channel, {})
         if not control.get('valid'):
             return
-        age_s = time.monotonic() - float(control.get('updated_monotonic', 0.0) or 0.0)
-        if age_s > 2.0:
-            return
         e720 = e720_from_msg(e720_msg)
-        if not e720_offline and not e720.get('online'):
-            return
-        now = time.monotonic()
-        min_interval = self.measurement_log_min_interval_sec
-        if rate_limit and now - self._last_measurement_log_monotonic < min_interval * 0.95:
-            return
         row = build_measurement_row(
             program_id,
             e720,
@@ -382,13 +378,13 @@ class WebHMINode(Node):
             self.log_monitor_channel,
             target_k,
             run_id=int(run_id),
-            e720_offline=e720_offline,
+            e720_updated_monotonic=e720_updated,
+            e720_max_age_sec=self.measurement_log_e720_max_age_sec,
         )
         try:
-            if insert_measurement(self._db_query, row):
-                self._last_measurement_log_monotonic = now
-        except Exception as exc:
-            self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
+            self._measurement_insert_queue.put_nowait(row)
+        except queue.Full:
+            self._log_throttled('measurement_log', 'Measurement insert queue full — sample dropped')
 
     def _start_program_run_record(self, program_id: int) -> Tuple[Optional[int], Optional[int], str]:
         if not self._db_available():
@@ -1332,7 +1328,6 @@ class WebHMINode(Node):
                 last_target_k=first_target_k,
             )
             self._sweep.reset()
-            self._last_measurement_log_monotonic = 0.0
             total_min = total_program_duration_s(steps) / 60.0
             self._log(f'Started program {program_id_int} ({len(steps)} steps, ~{total_min:.1f} min)')
             return (

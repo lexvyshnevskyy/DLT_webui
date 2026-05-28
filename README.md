@@ -190,8 +190,8 @@ Publish: measurement logging during program runs (when enabled).
 | `auth_user` / `auth_password` | `admin` / `admin` | Basic auth credentials |
 | `status_refresh_period_sec` | `1.0` | Dashboard WS / experiment poll period |
 | `control_loop_period_sec` | `1.0` | Experiment control loop |
-| `enable_measurement_logging` | `true` | DB rows while program runs |
-| `measurement_log_min_interval_sec` | `0.25` | Timer interval when E7-20 offline (freq/measures saved as 0) |
+| `enable_measurement_logging` | `true` | DB row on each LTM control-channel temperature (~3–4/s) |
+| `measurement_log_e720_max_age_sec` | `1.0` | Use last E7-20 freq/measures if newer than this; else 0 |
 | `enable_service_control` | `true` | Dashboard systemctl buttons |
 | `network_use_sudo` | `true` | Configuration uses `nmcli` via sudo |
 | `delatometry_env_file` | `/etc/default/delatometry` | Serial ports, PWM, feature flags |

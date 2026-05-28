@@ -18,6 +18,8 @@ webui:
     measurement_bulk_size: 12
     measurement_bulk_flush_sec: 0.25
     ros_service_timeout_sec: 15.0
+    database_list_timeout_sec: 30.0
+    programs_cache_refresh_sec: 3.0
     core_service_timeout_sec: 3.0
     run_charts_dir: ''
     enable_measurement_logging: false

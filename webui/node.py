@@ -100,6 +100,8 @@ class WebHMINode(Node):
         self.declare_parameter('measurement_bulk_size', 12)
         self.declare_parameter('measurement_bulk_flush_sec', 0.25)
         self.declare_parameter('ros_service_timeout_sec', 15.0)
+        self.declare_parameter('database_list_timeout_sec', 30.0)
+        self.declare_parameter('programs_cache_refresh_sec', 3.0)
         self.declare_parameter('core_service_timeout_sec', 3.0)
         self.declare_parameter('measurement_log_control_channel', 9)
         self.declare_parameter('measurement_log_monitor_channel', 3)
@@ -139,6 +141,14 @@ class WebHMINode(Node):
             float(self.get_parameter('measurement_bulk_flush_sec').value),
         )
         self.ros_service_timeout_sec = max(2.0, float(self.get_parameter('ros_service_timeout_sec').value))
+        self.database_list_timeout_sec = max(
+            5.0,
+            float(self.get_parameter('database_list_timeout_sec').value),
+        )
+        self.programs_cache_refresh_sec = max(
+            1.0,
+            float(self.get_parameter('programs_cache_refresh_sec').value),
+        )
         self.core_service_timeout_sec = max(1.0, float(self.get_parameter('core_service_timeout_sec').value))
         self._ros_executor_thread_id: Optional[int] = None
         self._pending_service_calls: queue.Queue = queue.Queue(maxsize=128)
@@ -214,8 +224,17 @@ class WebHMINode(Node):
         self._log_lines: Deque[str] = deque(maxlen=300)
         self._last_service_log_time: Dict[str, float] = {}
         self._measurement_insert_queue: queue.Queue = queue.Queue(maxsize=2000)
+        self._programs_cache_rows: List[List[Any]] = []
+        self._programs_cache_error: str = ''
+        self._programs_cache_updated_monotonic: float = 0.0
+        self._programs_cache_refreshing = False
+        self._programs_cache_timer = self.create_timer(
+            self.programs_cache_refresh_sec,
+            self._refresh_programs_cache,
+        )
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
         self._log('webui node started')
+        self._refresh_programs_cache()
 
     def _log(self, message: str) -> None:
         stamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -327,10 +346,24 @@ class WebHMINode(Node):
         request = request_type()
         request.query = json.dumps(payload)
         future = client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=float(timeout_sec))
+        # rclpy.task.Future.result() is not concurrent.futures.Future.result():
+        # on some ROS 2/Python versions it does not accept a timeout argument.
+        # Also, this method may run inside one MultiThreadedExecutor worker while
+        # another executor worker completes the client response.  Therefore wait
+        # by polling future.done() with a monotonic deadline.
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.005)
         if not future.done():
+            try:
+                future.cancel()
+            except Exception:
+                pass
             raise TimeoutError(f'Timeout waiting for {service_name}')
-        response = future.result()
+        try:
+            response = future.result()
+        except Exception as exc:
+            raise RuntimeError(f'Service call failed: {service_name}: {exc}') from exc
         if response is None:
             raise RuntimeError(f'Service call failed: {service_name}')
         return json.loads(response.response or '{}')
@@ -396,6 +429,12 @@ class WebHMINode(Node):
         return pending.result
 
     def _db_query(self, payload: Dict[str, Any], *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
+        if timeout_sec is None:
+            cmd = str(payload.get('cmd', ''))
+            if cmd in ('program_all_list', 'program_all_list_with_counts', 'program_run_counts'):
+                timeout_sec = self.database_list_timeout_sec
+            else:
+                timeout_sec = self.ros_service_timeout_sec
         return self._invoke_service_json(
             self.db_client,
             DatabaseQuery.Request,
@@ -404,13 +443,18 @@ class WebHMINode(Node):
             timeout_sec=timeout_sec,
         )
 
-    def _core_query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _core_query(self, payload: Dict[str, Any], *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
+        if timeout_sec is None:
+            if payload.get('program') is not None:
+                timeout_sec = max(self.core_service_timeout_sec, 30.0)
+            else:
+                timeout_sec = self.core_service_timeout_sec
         result = self._invoke_service_json(
             self.core_client,
             CoreQuery.Request,
             self.core_service,
             payload,
-            timeout_sec=self.core_service_timeout_sec,
+            timeout_sec=timeout_sec,
         )
         with self._lock:
             self._last_core_snapshot = result
@@ -819,20 +863,97 @@ class WebHMINode(Node):
                 counts[int(parts[0])] = int(parts[1])
         return counts
 
-    def _programs_table(self) -> List[List[Any]]:
-        if not self._db_available():
-            return []
-        response = self._db_query({'cmd': 'program_all_list'})
-        if response.get('result') != 'Ok':
-            return []
-        run_counts = self._program_run_counts_map()
-        rows = []
+    def _parse_program_all_rows(self, response: Dict[str, Any]) -> List[List[Any]]:
+        rows: List[List[Any]] = []
         for raw_row in response.get('row', []):
             parts = str(raw_row).split('^')
             if len(parts) >= 3:
                 pid = int(parts[0])
-                rows.append([pid, parts[1], parts[2], run_counts.get(pid, 0)])
+                run_count = int(parts[3]) if len(parts) >= 4 else 0
+                rows.append([pid, parts[1], parts[2], run_count])
         return rows
+
+    def _fetch_programs_table_from_db(self) -> Tuple[List[List[Any]], str]:
+        if not self._db_available():
+            return [], self._database_unavailable_message()
+        try:
+            response = self._db_query({'cmd': 'program_all_list_with_counts'})
+            if response.get('result') != 'Ok':
+                err = str(response.get('error', ''))
+                if 'No handler' in err or 'program_all_list_with_counts' in err:
+                    response = self._db_query({'cmd': 'program_all_list'})
+                    if response.get('result') != 'Ok':
+                        return [], f'Database error: {response.get("error", "program list failed")}'
+                    counts = self._program_run_counts_map()
+                    rows = []
+                    for raw_row in response.get('row', []):
+                        parts = str(raw_row).split('^')
+                        if len(parts) >= 3:
+                            pid = int(parts[0])
+                            rows.append([pid, parts[1], parts[2], counts.get(pid, 0)])
+                    return rows, ''
+                return [], f'Database error: {err}'
+            return self._parse_program_all_rows(response), ''
+        except TimeoutError:
+            msg = (
+                f'Database query timed out ({self.database_service}). '
+                'Showing last cached list if available.'
+            )
+            self._log_throttled('programs_table', msg)
+            return [], msg
+        except Exception as exc:
+            msg = f'Database error: {exc}'
+            self._log_throttled('programs_table', msg)
+            return [], msg
+
+    def _refresh_programs_cache(self) -> None:
+        if self._programs_cache_refreshing:
+            return
+        self._programs_cache_refreshing = True
+        try:
+            rows, err = self._fetch_programs_table_from_db()
+            with self._lock:
+                if rows:
+                    self._programs_cache_rows = rows
+                    self._programs_cache_error = ''
+                elif not self._programs_cache_rows:
+                    self._programs_cache_error = err
+                else:
+                    self._programs_cache_error = err
+                self._programs_cache_updated_monotonic = time.monotonic()
+        finally:
+            self._programs_cache_refreshing = False
+
+    def _programs_table(self, *, force_refresh: bool = False) -> Tuple[List[List[Any]], str]:
+        if force_refresh:
+            rows, err = self._fetch_programs_table_from_db()
+            with self._lock:
+                if rows:
+                    self._programs_cache_rows = rows
+                    self._programs_cache_error = ''
+                else:
+                    self._programs_cache_error = err
+                self._programs_cache_updated_monotonic = time.monotonic()
+            return rows, err
+        with self._lock:
+            rows = list(self._programs_cache_rows)
+            err = self._programs_cache_error
+            age = time.monotonic() - self._programs_cache_updated_monotonic
+        if rows:
+            if err and age > self.programs_cache_refresh_sec * 2:
+                return rows, f'{err} (showing cached list)'
+            return rows, ''
+        if age < 1.0 and not err:
+            return [], 'Loading programs…'
+        rows, err = self._fetch_programs_table_from_db()
+        with self._lock:
+            if rows:
+                self._programs_cache_rows = rows
+                self._programs_cache_error = ''
+            else:
+                self._programs_cache_error = err
+            self._programs_cache_updated_monotonic = time.monotonic()
+        return rows, err
 
     def _program_runs_table(self, program_id: int) -> List[Dict[str, Any]]:
         if not self._db_available() or program_id <= 0:
@@ -1253,8 +1374,8 @@ class WebHMINode(Node):
     def ui_refresh_programs(self) -> Tuple[List[List[Any]], str]:
         if not self._db_available():
             return [], self._database_unavailable_message()
-        rows = self._programs_table()
-        return rows, f'{len(rows)} program(s).'
+        rows, err = self._programs_table(force_refresh=True)
+        return rows, err or f'{len(rows)} program(s).'
 
     def ui_load_program(self, program_id: float) -> Tuple[List[List[Any]], str, str]:
         if not self._db_available():
@@ -1275,10 +1396,12 @@ class WebHMINode(Node):
         try:
             response = self._db_query({'cmd': 'new_program'})
             if response.get('result') != 'Ok':
-                return 0.0, self._programs_table(), f'ERROR: {response.get("error", "unknown")}'
+                rows, _ = self._programs_table(force_refresh=True)
+                return 0.0, rows, f'ERROR: {response.get("error", "unknown")}'
             program_id = int(response.get('ID', 0))
             self._log(f'Created program {program_id}')
-            return float(program_id), self._programs_table(), f'Created program {program_id}.'
+            rows, _ = self._programs_table(force_refresh=True)
+            return float(program_id), rows, f'Created program {program_id}.'
         except Exception as exc:
             return 0.0, [], f'ERROR: {exc}'
 
@@ -1287,11 +1410,13 @@ class WebHMINode(Node):
             return 0.0, [], self._database_unavailable_message()
         source_id = int(program_id)
         if source_id <= 0:
-            return 0.0, self._programs_table(), 'Select a program to duplicate.'
+            rows, _ = self._programs_table()
+            return 0.0, rows, 'Select a program to duplicate.'
         try:
             created = self._db_query({'cmd': 'new_program'})
             if created.get('result') != 'Ok':
-                return 0.0, self._programs_table(), 'Failed to create new program.'
+                rows, _ = self._programs_table()
+                return 0.0, rows, 'Failed to create new program.'
             new_id = int(created.get('ID', 0))
             for step in self._get_program_steps(source_id):
                 self._db_query({
@@ -1307,7 +1432,8 @@ class WebHMINode(Node):
                 row['id'] = new_id
                 self._db_query({'cmd': 'set_e720', **row})
             self._log(f'Duplicated program {source_id} -> {new_id}')
-            return float(new_id), self._programs_table(), f'Duplicated as program {new_id}.'
+            rows, _ = self._programs_table(force_refresh=True)
+            return float(new_id), rows, f'Duplicated as program {new_id}.'
         except Exception as exc:
             return 0.0, [], f'ERROR: {exc}'
 
@@ -1316,15 +1442,21 @@ class WebHMINode(Node):
             return [], self._database_unavailable_message(), program_id
         program_id_int = int(program_id)
         if program_id_int <= 0:
-            return self._programs_table(), 'Invalid program ID.', program_id
-        if self._experiment.program_id == program_id_int:
-            return self._programs_table(), 'Stop the running program first.', program_id
+            rows, _ = self._programs_table()
+            return rows, 'Invalid program ID.', program_id
+        with self._lock:
+            active_pid = self._core_program_status.get('program_id')
+        if active_pid is not None and int(active_pid) == program_id_int:
+            rows, _ = self._programs_table()
+            return rows, 'Stop the running program first.', program_id
         try:
             response = self._db_query({'cmd': 'program_delete_by_id', 'id': program_id_int})
             if response.get('result') != 'Ok':
-                return self._programs_table(), f'ERROR: {response.get("error", "delete failed")}', program_id
+                rows, _ = self._programs_table()
+                return rows, f'ERROR: {response.get("error", "delete failed")}', program_id
             self._log(f'Deleted program {program_id_int}')
-            return self._programs_table(), f'Deleted program {program_id_int}.', 0.0
+            rows, _ = self._programs_table(force_refresh=True)
+            return rows, f'Deleted program {program_id_int}.', 0.0
         except Exception as exc:
             return [], f'ERROR: {exc}', program_id
 
@@ -1684,7 +1816,6 @@ class WebHMINode(Node):
             'experiment_mode': status['mode'],
             'run_label': status.get('run_label'),
             'timing': status['timing'],
-            'ltm_summary': self._ltm_temperature_summary(),
             'measurements': self._measurements_table(),
             'ltm_stream': ltm_lines,
             'e720_summary': e720_summary_text(e720_data),
@@ -1811,8 +1942,8 @@ class WebHMINode(Node):
     def ui_programs_list_refresh(self) -> Tuple[List[List[Any]], str]:
         if not self._db_available():
             return [], self._database_unavailable_message()
-        rows = self._programs_table()
-        return rows, f'{len(rows)} program(s) in database.'
+        rows, err = self._programs_table(force_refresh=True)
+        return rows, err or f'{len(rows)} program(s) in database.'
 
     def ui_programs_nav_view(self, program_id: int) -> Tuple[int, str]:
         pid = int(program_id or 0)
@@ -1835,9 +1966,13 @@ class WebHMINode(Node):
         if not self._db_available():
             return [], self._database_unavailable_message()
         if pid <= 0:
-            return self._programs_table(), 'Select a program first.'
-        if self._experiment.program_id == pid:
-            return self._programs_table(), 'Stop the running program before deleting it.'
+            rows, _ = self._programs_table()
+            return rows, 'Select a program first.'
+        with self._lock:
+            active_pid = self._core_program_status.get('program_id')
+        if active_pid is not None and int(active_pid) == pid:
+            rows, _ = self._programs_table()
+            return rows, 'Stop the running program before deleting it.'
         try:
             self._db_query({'cmd': 'measurement_delete_by_program_id', 'program_id': pid})
             response = self._db_query({'cmd': 'program_delete_by_id', 'id': pid})
@@ -1846,8 +1981,8 @@ class WebHMINode(Node):
             else:
                 msg = f'Program {pid} and its data were deleted.'
                 self._log(msg)
-            rows = self._programs_table()
-            return rows, msg
+            rows, err = self._programs_table(force_refresh=True)
+            return rows, err or msg
         except Exception as exc:
             return [], f'ERROR: {exc}'
 
@@ -1926,8 +2061,20 @@ class WebHMINode(Node):
                 'run_status': f'ERROR: {exc}',
             }
 
+    def _sync_core_program_status(self) -> None:
+        if not self._core_available():
+            return
+        try:
+            response = self._core_query({'program': {'cmd': 'status'}})
+            if str(response.get('result', '')).lower() in ('ok', 'true'):
+                with self._lock:
+                    self._core_program_status = dict(response.get('program') or {})
+        except Exception:
+            pass
+
     def program_view_fields(self, program_id: int) -> Dict[str, Any]:
         pid = int(program_id or 0)
+        self._sync_core_program_status()
         if not self._db_available() or pid <= 0:
             return {
                 'summary': 'Select a program on the list first.',
@@ -1967,8 +2114,9 @@ class WebHMINode(Node):
             db_status = str(row.get('status') or 'New')
             program_runs = self._program_runs_table(pid)
             with self._lock:
-                active_id = self._experiment.program_id
-                active_run_id = self._experiment.run_id
+                prog = self._core_program_status
+                active_id = prog.get('program_id')
+                active_run_id = prog.get('run_id')
             is_running_here = active_id is not None and int(active_id) == pid
             for run in program_runs:
                 run['is_active'] = (
@@ -2047,6 +2195,7 @@ class WebHMINode(Node):
                 })
             self.ui_programs_set_nav(program_id)
             self.clear_new_program_draft()
+            self._refresh_programs_cache()
             self._log(f'Created program {program_id}')
             return f'Program {program_id} created.'
         except Exception as exc:

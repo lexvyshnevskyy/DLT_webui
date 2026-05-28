@@ -33,14 +33,15 @@ def _e720_choices():
 
 
 @router.get('/programs', response_class=HTMLResponse)
-async def programs_list(request: Request, msg: str = Query('')) -> HTMLResponse:
+async def programs_list(request: Request, msg: str = Query(''), refresh: int = Query(0)) -> HTMLResponse:
     templates, node = _tpl(request)
-    rows = node._programs_table()
+    rows, table_err = node._programs_table(force_refresh=bool(refresh))
+    banner = table_err or msg
     return template_response(
         templates,
         request,
         'programs/list.html',
-        {'programs': rows, 'message': msg, 'title': node.title},
+        {'programs': rows, 'message': banner, 'title': node.title},
     )
 
 
@@ -126,7 +127,7 @@ async def program_new_create(
     msg = node.ui_program_create_from_draft(description, sweep_mode, enabled_freqs, range_max)
     if not msg.startswith('Program '):
         return RedirectResponse(url=f'/program-new?msg={quote(msg)}', status_code=303)
-    return RedirectResponse(url=f'/programs?msg={quote(msg)}', status_code=303)
+    return RedirectResponse(url=f'/programs?msg={quote(msg)}&refresh=1', status_code=303)
 
 
 @router.get('/program-view', response_class=HTMLResponse)
@@ -137,22 +138,27 @@ async def program_view(request: Request, id: int = Query(0), msg: str = Query(''
         templates,
         request,
         'programs/view.html',
-        {'title': node.title, 'program_id': id, 'message': msg, **fields},
+        {
+            'title': node.title,
+            'program_id': id,
+            **fields,
+            'message': msg or fields.get('message', ''),
+        },
     )
 
 
 @router.post('/program-view/run')
 async def program_view_run(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
-    _, banner = node.ui_start_program(float(id))
-    return RedirectResponse(url=f'/program-view?id={id}&msg={quote(banner)}', status_code=303)
+    msg, _banner = node.ui_start_program(float(id))
+    return RedirectResponse(url=f'/program-view?id={id}&msg={quote(msg)}', status_code=303)
 
 
 @router.post('/program-view/stop')
 async def program_view_stop(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
-    _, banner = node.ui_stop_program_by_id(float(id))
-    return RedirectResponse(url=f'/program-view?id={id}&msg={quote(banner)}', status_code=303)
+    msg, _banner = node.ui_stop_program_by_id(float(id))
+    return RedirectResponse(url=f'/program-view?id={id}&msg={quote(msg)}', status_code=303)
 
 
 @router.post('/program-view/run/delete')
@@ -336,8 +342,8 @@ async def program_edit_remove_step(request: Request, id: int = Form(...), step_i
 async def program_edit_run(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
     node.ui_programs_set_nav(id)
-    node.ui_start_program(float(id))
-    return RedirectResponse(url=f'/program-edit?id={id}', status_code=303)
+    msg, _banner = node.ui_start_program(float(id))
+    return RedirectResponse(url=f'/program-edit?id={id}&msg={quote(msg)}', status_code=303)
 
 
 @router.post('/program-edit/stop')

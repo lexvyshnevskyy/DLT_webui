@@ -178,7 +178,6 @@ class WebHMINode(Node):
         self.create_subscription(String, self.experiment_status_topic, self._on_core_experiment_status, 10)
 
         self._sweep = E720SweepController()
-        self._experiment = ExperimentState()
         self._core_program_status: Dict[str, Any] = {}
         self._program_was_running: bool = False
 
@@ -282,25 +281,15 @@ class WebHMINode(Node):
             prev_pid = self._core_program_status.get('program_id')
             prev_run = self._core_program_status.get('run_id')
             self._core_program_status = dict(program)
-            snap = dict(self._last_core_snapshot)
-            snap['program'] = program
+            incoming: Dict[str, Any] = {'result': 'Ok', 'program': program}
             if tc is not None:
-                snap['temperature_control'] = tc
+                incoming['temperature_control'] = tc
             if pwm is not None:
-                snap['pwm'] = pwm
-            self._last_core_snapshot = snap
+                incoming['pwm'] = pwm
+            self._last_core_snapshot = self._merge_core_snapshot(incoming)
             new_pid = program.get('program_id')
-            new_run = program.get('run_id')
-            if new_pid is not None:
-                self._experiment.program_id = int(new_pid)
-                self._experiment.run_id = int(new_run) if new_run is not None else None
-                self._experiment.run_index = program.get('run_index')
-                self._experiment.last_target_k = program.get('last_target_k')
-                self._experiment.status = str(program.get('status') or 'Running')
-            elif prev_pid is not None:
-                self._experiment = ExperimentState()
-                if prev_run is not None:
-                    ended = (int(prev_pid), int(prev_run))
+            if new_pid is None and prev_pid is not None and prev_run is not None:
+                ended = (int(prev_pid), int(prev_run))
         if ended is not None:
             pid, rid = ended
             self._schedule_run_charts(rid, pid)
@@ -620,7 +609,7 @@ class WebHMINode(Node):
                 })
             stats = run.get('measurement_stats') or {}
             with self._lock:
-                active_run = self._experiment.run_id
+                active_run = self._core_program_status.get('run_id')
             is_active = active_run is not None and int(active_run) == rid
             charts_ready = temperature_chart_url is not None or any(t.get('chart_url') for t in freq_tabs)
             return {
@@ -768,9 +757,14 @@ class WebHMINode(Node):
             ),
             f'All LTM temp channels: {sum(1 for v in items.values() if self._is_ltm_temperature(v))}',
         ]
-        exp = self._experiment
-        if exp.program_id is not None:
-            lines.append(f'Program {exp.program_id} running — step {exp.step_index + 1}/{len(exp.steps)}')
+        with self._lock:
+            prog = self._core_program_status
+        if prog.get('program_id') is not None:
+            timing = prog.get('timing') or {}
+            step = timing.get('step_index', '?')
+            total = timing.get('step_count', '?')
+            label = prog.get('run_label') or prog.get('program_id')
+            lines.append(f'Program {label} running — step {step}/{total}')
         return '\n'.join(lines)
 
     def _stream_text(self, stream: Deque[str]) -> str:
@@ -1509,9 +1503,6 @@ class WebHMINode(Node):
                     {'program': {'cmd': 'status'}},
                     timeout_sec=min(2.0, self.core_service_timeout_sec),
                 )
-                if str(response.get('result', '')).lower() in ('ok', 'true'):
-                    with self._lock:
-                        self._core_program_status = dict(response.get('program') or {})
             except Exception:
                 pass
         with self._lock:

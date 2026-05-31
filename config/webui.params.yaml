@@ -14,17 +14,11 @@ webui:
     auth_password: admin
     status_refresh_period_sec: 1.0
     control_loop_period_sec: 1.0
-    measurement_log_e720_max_age_sec: 1.0
-    measurement_bulk_size: 12
-    measurement_bulk_flush_sec: 0.25
     ros_service_timeout_sec: 15.0
     database_list_timeout_sec: 30.0
     programs_cache_refresh_sec: 3.0
     core_service_timeout_sec: 3.0
     run_charts_dir: ''
-    enable_measurement_logging: false
-    measurement_log_control_channel: 9
-    measurement_log_monitor_channel: 3
     ltm_raw_topic: /ltm2985/raw_json
     ads_topic: /ads1256
     stream_max_lines: 30

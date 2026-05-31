@@ -31,10 +31,7 @@ from webui.experiment_runner import (
     experiment_timing,
 )
 from webui.export_data import export_program_archive, export_run_archive
-from webui.measurement_log import build_measurement_row, insert_measurements_bulk
 from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
-
-_MEASUREMENT_QUEUE_STOP = object()
 
 
 @dataclass
@@ -95,16 +92,10 @@ class WebHMINode(Node):
         self.declare_parameter('run_charts_dir', '')
         self.declare_parameter('enable_service_control', True)
         self.declare_parameter('network_use_sudo', True)
-        self.declare_parameter('enable_measurement_logging', True)
-        self.declare_parameter('measurement_log_e720_max_age_sec', 1.0)
-        self.declare_parameter('measurement_bulk_size', 12)
-        self.declare_parameter('measurement_bulk_flush_sec', 0.25)
         self.declare_parameter('ros_service_timeout_sec', 15.0)
         self.declare_parameter('database_list_timeout_sec', 30.0)
         self.declare_parameter('programs_cache_refresh_sec', 3.0)
         self.declare_parameter('core_service_timeout_sec', 3.0)
-        self.declare_parameter('measurement_log_control_channel', 9)
-        self.declare_parameter('measurement_log_monitor_channel', 3)
         self.declare_parameter('ltm_raw_topic', '/ltm2985/raw_json')
         self.declare_parameter('ads_topic', '/ads1256')
         self.declare_parameter('stream_max_lines', 30)
@@ -130,16 +121,6 @@ class WebHMINode(Node):
         self.delatometry_env_file = str(self.get_parameter('delatometry_env_file').value)
         self.enable_service_control = bool(self.get_parameter('enable_service_control').value)
         self.network_use_sudo = bool(self.get_parameter('network_use_sudo').value)
-        self.enable_measurement_logging = bool(self.get_parameter('enable_measurement_logging').value)
-        self.measurement_log_e720_max_age_sec = max(
-            0.1,
-            float(self.get_parameter('measurement_log_e720_max_age_sec').value),
-        )
-        self.measurement_bulk_size = max(1, int(self.get_parameter('measurement_bulk_size').value))
-        self.measurement_bulk_flush_sec = max(
-            0.1,
-            float(self.get_parameter('measurement_bulk_flush_sec').value),
-        )
         self.ros_service_timeout_sec = max(2.0, float(self.get_parameter('ros_service_timeout_sec').value))
         self.database_list_timeout_sec = max(
             5.0,
@@ -158,8 +139,6 @@ class WebHMINode(Node):
             self._dispatch_pending_service_calls,
             callback_group=self._dispatch_cb_group,
         )
-        self.log_control_channel = int(self.get_parameter('measurement_log_control_channel').value)
-        self.log_monitor_channel = int(self.get_parameter('measurement_log_monitor_channel').value)
         self.ltm_raw_topic = str(self.get_parameter('ltm_raw_topic').value)
         self.ads_topic = str(self.get_parameter('ads_topic').value)
         self.stream_max_lines = int(self.get_parameter('stream_max_lines').value)
@@ -223,7 +202,6 @@ class WebHMINode(Node):
         self._last_core_snapshot: Dict[str, Any] = {}
         self._log_lines: Deque[str] = deque(maxlen=300)
         self._last_service_log_time: Dict[str, float] = {}
-        self._measurement_insert_queue: queue.Queue = queue.Queue(maxsize=2000)
         self._programs_cache_rows: List[List[Any]] = []
         self._programs_cache_error: str = ''
         self._programs_cache_updated_monotonic: float = 0.0
@@ -525,97 +503,6 @@ class WebHMINode(Node):
         msg = UInt8()
         msg.data = int(byte_val) & 0xFF
         self._e720_cmd_pub.publish(msg)
-
-    def _flush_measurement_batch(self, batch: List[Dict[str, Any]]) -> None:
-        if not batch:
-            return
-        if not self._db_available():
-            return
-        if not insert_measurements_bulk(
-            lambda payload: self._db_query(payload, timeout_sec=self.ros_service_timeout_sec),
-            batch,
-        ):
-            self._log_throttled('measurement_log', f'measurement_bulk_insert failed ({len(batch)} rows)')
-
-    def _measurement_insert_worker(self) -> None:
-        batch: List[Dict[str, Any]] = []
-        last_flush = time.monotonic()
-        while True:
-            try:
-                row = self._measurement_insert_queue.get(timeout=self.measurement_bulk_flush_sec)
-            except queue.Empty:
-                if batch:
-                    try:
-                        self._flush_measurement_batch(batch)
-                    except Exception as exc:
-                        self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
-                    batch = []
-                    last_flush = time.monotonic()
-                continue
-            if row is _MEASUREMENT_QUEUE_STOP:
-                self._measurement_insert_queue.task_done()
-                break
-            batch.append(row)
-            self._measurement_insert_queue.task_done()
-            now = time.monotonic()
-            if len(batch) >= self.measurement_bulk_size or (now - last_flush) >= self.measurement_bulk_flush_sec:
-                try:
-                    self._flush_measurement_batch(batch)
-                except Exception as exc:
-                    self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
-                batch = []
-                last_flush = now
-        if batch:
-            try:
-                self._flush_measurement_batch(batch)
-            except Exception as exc:
-                self._log_throttled('measurement_log', f'Measurement log failed: {exc}')
-
-    def _maybe_log_measurement(self, target_k: Optional[float]) -> None:
-        """Store one row per LTM control-channel temperature sample (target ~3–4/s)."""
-        if not self.enable_measurement_logging:
-            return
-        with self._lock:
-            prog = self._core_program_status
-            program_id = prog.get('program_id')
-            run_id = prog.get('run_id')
-            e720_msg = self._latest_e720
-            e720_updated = self._latest_e720_monotonic
-            temps = dict(self._latest_measurements)
-        if program_id is None or run_id is None:
-            return
-        control = temps.get(self.log_control_channel, {})
-        if not control.get('valid'):
-            return
-        e720 = e720_from_msg(e720_msg)
-        row = build_measurement_row(
-            program_id,
-            e720,
-            temps,
-            self.log_control_channel,
-            self.log_monitor_channel,
-            target_k,
-            run_id=int(run_id),
-            e720_updated_monotonic=e720_updated,
-            e720_max_age_sec=self.measurement_log_e720_max_age_sec,
-        )
-        try:
-            self._measurement_insert_queue.put_nowait(row)
-        except queue.Full:
-            self._log_throttled('measurement_log', 'Measurement insert queue full — sample dropped')
-
-    def _start_program_run_record(self, program_id: int) -> Tuple[Optional[int], Optional[int], str]:
-        if not self._db_available():
-            return None, None, ''
-        response = self._db_query({'cmd': 'program_run_start', 'program_id': program_id})
-        if response.get('result') != 'Ok':
-            return None, None, str(response.get('error', 'program run start failed'))
-        row = response.get('row') or {}
-        run_id = int(row.get('run_id', 0) or 0)
-        run_index = int(row.get('run_index', 0) or 0)
-        if run_id <= 0:
-            return None, None, 'program run start returned no run_id'
-        return run_id, run_index, ''
 
     def _schedule_run_charts(self, run_id: int, program_id: int) -> None:
         def _worker() -> None:

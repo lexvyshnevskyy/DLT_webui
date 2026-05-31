@@ -1839,6 +1839,7 @@ class WebHMINode(Node):
             'run_label': status.get('run_label'),
             'timing': status['timing'],
             'measurements': self._measurements_table(),
+            'ltm_summary': self._ltm_temperature_summary(),
             'ltm_stream': ltm_lines,
             'e720_summary': e720_summary_text(e720_data),
             'e720_row': e720_table_row(e720_data),

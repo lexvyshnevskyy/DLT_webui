@@ -7,13 +7,15 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from webui.async_bridge import run_blocking
 from webui.render import template_response
 
 router = APIRouter()
 
 
 async def _dashboard_live_payload(conn: Request | WebSocket) -> dict:
-    return conn.app.state.node.get_dashboard_snapshot()
+    node = conn.app.state.node
+    return await run_blocking(node.get_dashboard_snapshot)
 
 
 def _tpl(request: Request):
@@ -23,7 +25,7 @@ def _tpl(request: Request):
 @router.get('/dashboard', response_class=HTMLResponse)
 async def dashboard_page(request: Request, msg: str = Query('')) -> HTMLResponse:
     templates, node = _tpl(request)
-    ctx = node.get_dashboard_context()
+    ctx = await run_blocking(node.get_dashboard_context)
     ctx['message'] = msg
     return template_response(templates, request, 'dashboard.html', ctx)
 
@@ -31,7 +33,7 @@ async def dashboard_page(request: Request, msg: str = Query('')) -> HTMLResponse
 @router.post('/dashboard/service')
 async def service_control(request: Request, unit: str = Form(...), action: str = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
-    result_msg = node.ui_service_control(unit, action)
+    result_msg = await run_blocking(node.ui_service_control, unit, action)
     return RedirectResponse(url=f'/dashboard?msg={quote(result_msg)}', status_code=303)
 
 

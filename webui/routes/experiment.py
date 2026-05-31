@@ -7,6 +7,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from webui.async_bridge import run_blocking
 from webui.render import template_response
 
 router = APIRouter()
@@ -34,20 +35,20 @@ async def experiment_page(request: Request, msg: str = Query('')) -> HTMLRespons
 @router.get('/experiment/status')
 async def experiment_status(request: Request) -> JSONResponse:
     _, node = _tpl(request)
-    return JSONResponse(node.get_experiment_status())
+    return JSONResponse(await run_blocking(node.get_experiment_status))
 
 
 @router.get('/api/experiment/status')
 async def experiment_status_api(request: Request) -> JSONResponse:
     _, node = _tpl(request)
-    return JSONResponse(node.get_experiment_status())
+    return JSONResponse(await run_blocking(node.get_experiment_status))
 
 
 @router.get('/api/experiment/snapshot')
 async def experiment_snapshot_api(request: Request) -> JSONResponse:
     _, node = _tpl(request)
     try:
-        return JSONResponse(node.get_experiment_snapshot())
+        return JSONResponse(await run_blocking(node.get_experiment_snapshot))
     except Exception as exc:
         return JSONResponse({'error': str(exc)}, status_code=500)
 
@@ -55,7 +56,7 @@ async def experiment_snapshot_api(request: Request) -> JSONResponse:
 @router.post('/experiment/stop')
 async def experiment_stop(request: Request) -> RedirectResponse:
     _, node = _tpl(request)
-    _, result_msg = node.ui_stop_program()
+    _, result_msg = await run_blocking(node.ui_stop_program)
     return RedirectResponse(url=f'/experiment?msg={quote(result_msg)}', status_code=303)
 
 
@@ -65,7 +66,7 @@ async def experiment_stabilize(
     target_k: float = Form(300.0),
 ) -> RedirectResponse:
     _, node = _tpl(request)
-    result_msg = node.ui_manual_target(float(target_k), True)
+    result_msg = await run_blocking(node.ui_manual_target, float(target_k), True)
     return RedirectResponse(url=f'/experiment?msg={quote(result_msg)}', status_code=303)
 
 
@@ -77,7 +78,7 @@ async def experiment_manual(
 ) -> RedirectResponse:
     _, node = _tpl(request)
     manual_on = enabled.lower() in ('true', '1', 'on', 'yes')
-    result_msg = node.ui_manual_target(target_k, manual_on)
+    result_msg = await run_blocking(node.ui_manual_target, target_k, manual_on)
     return RedirectResponse(url=f'/experiment?msg={quote(result_msg)}', status_code=303)
 
 
@@ -88,7 +89,7 @@ async def experiment_ws(websocket: WebSocket) -> None:
     period = max(0.2, float(node.status_refresh_period_sec))
     try:
         while True:
-            payload = node.get_experiment_snapshot()
+            payload = await run_blocking(node.get_experiment_snapshot)
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(period)
     except WebSocketDisconnect:

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from webui.e720_sweep import STANDARD_FREQUENCIES
 from webui.i18n import translate_e720_modes, translate_validation_result
 from webui.program_steps import parse_step_field_updates
+from webui.async_bridge import run_blocking
 from webui.render import template_response
 from webui.temperature_validation import (
     T_MAX_K,
@@ -248,16 +249,19 @@ async def program_run_measurements_api(
     limit: int = Query(100),
 ) -> JSONResponse:
     _, node = _tpl(request)
-    if not node._db_available():
-        return JSONResponse({'result': 'False', 'row': [], 'total': 0, 'error': 'database unavailable'})
-    response = node._db_query({
-        'cmd': 'measurement_list_page',
-        'run_id': run_id,
-        'program_id': program_id,
-        'offset': max(0, offset),
-        'limit': min(500, max(1, limit)),
-    })
-    return JSONResponse(response)
+
+    def _fetch() -> dict:
+        if not node._db_available():
+            return {'result': 'False', 'row': [], 'total': 0, 'error': 'database unavailable'}
+        return node._db_query({
+            'cmd': 'measurement_list_page',
+            'run_id': run_id,
+            'program_id': program_id,
+            'offset': max(0, offset),
+            'limit': min(500, max(1, limit)),
+        })
+
+    return JSONResponse(await run_blocking(_fetch))
 
 
 @router.get('/program-edit', response_class=HTMLResponse)

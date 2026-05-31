@@ -24,12 +24,7 @@ from webui.program_steps import parse_step_field_updates
 from webui.temperature_validation import suggest_next_step, validate_new_program, validate_temperature_steps
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
-from webui.experiment_runner import (
-    ExperimentRunner,
-    ExperimentState,
-    ProgramStep,
-    experiment_timing,
-)
+from webui.program_schedule import IDLE_EXPERIMENT_TIMING, ProgramStep, parse_program_steps
 from webui.export_data import export_program_archive, export_run_archive
 from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
 
@@ -181,6 +176,7 @@ class WebHMINode(Node):
         self._sweep_loaded_program_id: Optional[int] = None
         self._core_program_status: Dict[str, Any] = {}
         self._program_was_running: bool = False
+        self._last_active_run: Optional[Tuple[int, int]] = None
 
         self._lock = threading.RLock()
         self._programs_nav_program_id = 0
@@ -295,7 +291,7 @@ class WebHMINode(Node):
                 ended = (int(prev_pid), int(prev_run))
         if ended is not None:
             pid, rid = ended
-            self._schedule_run_charts(rid, pid)
+            self._schedule_run_charts_on_finish(pid, rid)
             self._clear_e720_sweep_runtime()
         elif program.get('program_id') is not None:
             self._ensure_e720_sweep_for_running_program()
@@ -508,7 +504,7 @@ class WebHMINode(Node):
         response = self._db_query({'cmd': 'program_step_list', 'id': program_id})
         if response.get('result') != 'Ok':
             raise RuntimeError(response.get('error', 'Failed to load program steps'))
-        return ExperimentRunner.parse_steps(response.get('row', []))
+        return parse_program_steps(response.get('row', []))
 
     def _load_e720_config_for_program(self, program_id: int) -> None:
         if program_id <= 0 or not self._db_available():
@@ -557,6 +553,11 @@ class WebHMINode(Node):
         msg = UInt8()
         msg.data = int(byte_val) & 0xFF
         self._e720_cmd_pub.publish(msg)
+
+    def _schedule_run_charts_on_finish(self, program_id: int, run_id: int) -> None:
+        if program_id <= 0 or run_id <= 0:
+            return
+        self._schedule_run_charts(run_id, program_id)
 
     def _schedule_run_charts(self, run_id: int, program_id: int) -> None:
         def _worker() -> None:
@@ -690,13 +691,26 @@ class WebHMINode(Node):
     def _control_tick(self) -> None:
         try:
             self._refresh_core_live_state()
+            finished_run: Optional[Tuple[int, int]] = None
             with self._lock:
-                running = self._core_program_status.get('program_id') is not None
+                prog = self._core_program_status
+                running = prog.get('program_id') is not None
                 e720_data = e720_from_msg(self._latest_e720)
                 was_running = self._program_was_running
                 self._program_was_running = running
+                if running:
+                    pid = int(prog['program_id'])
+                    rid = prog.get('run_id')
+                    if rid is not None:
+                        self._last_active_run = (pid, int(rid))
+                elif was_running and self._last_active_run is not None:
+                    finished_run = self._last_active_run
+                    self._last_active_run = None
 
-            if was_running and not running:
+            if finished_run is not None:
+                self._clear_e720_sweep_runtime()
+                self._schedule_run_charts_on_finish(finished_run[0], finished_run[1])
+            elif was_running and not running:
                 self._clear_e720_sweep_runtime()
 
             if running:
@@ -942,48 +956,7 @@ class WebHMINode(Node):
     def _steps_table(self, program_id: int) -> List[List[Any]]:
         return [[s.step_id, s.t_start, s.t_stop, s.minutes] for s in self._get_program_steps(program_id)]
 
-    # --- UI handlers ---
-    def ui_tick_general(self) -> Tuple[Any, ...]:
-        host = host_stats.collect_host_stats()
-        host_summary = (
-            {
-                'cpu_percent': host.get('cpu_percent'),
-                'load_avg': host.get('load_avg'),
-                'memory_percent': host.get('memory_percent'),
-                'memory_used_gb': host.get('memory_used_gb'),
-                'memory_total_gb': host.get('memory_total_gb'),
-            }
-            if host.get('available')
-            else {'error': host.get('error')}
-        )
-        return (
-            self._critical_services_status(),
-            host_summary,
-            systemd_ops.units_table(self.systemd_units),
-            host.get('disk_rows', []),
-            serial_ports.uart_table(self.delatometry_env_file),
-            network_info.interfaces_table(),
-            '\n'.join(list(self._log_lines)),
-        )
-
-    def ui_tick_experiment(self) -> Tuple[Any, ...]:
-        with self._lock:
-            e720_msg = self._latest_e720
-            ltm_stream = self._stream_text(self._ltm_stream)
-            e720_stream = self._stream_text(self._e720_stream)
-        e720_data = e720_from_msg(e720_msg)
-        core_json = json.dumps(self._last_core_snapshot.get('temperature_control') or {}, indent=2)
-        return (
-            self._experiment_banner(),
-            self._ltm_temperature_summary(),
-            self._measurements_table(),
-            ltm_stream,
-            e720_summary_text(e720_data),
-            [e720_table_row(e720_data)],
-            e720_stream,
-            core_json,
-        )
-
+    # --- UI handlers (FastAPI routes call these) ---
     def ui_peek_ltm_topic(self) -> str:
         with self._lock:
             measurements = {
@@ -1061,9 +1034,6 @@ class WebHMINode(Node):
         with self._lock:
             self._last_db_test_msg = result
         return result
-
-    def ui_tick_network(self) -> List[List[Any]]:
-        return network_info.interfaces_table()
 
     def _iface_summary(self, iface: str) -> str:
         row = network_info.get_interface(iface)
@@ -1526,12 +1496,16 @@ class WebHMINode(Node):
             return self._core_unavailable_message(), self._experiment_banner()
         program_id_int = int(program_id)
         try:
+            with self._lock:
+                run_id = self._core_program_status.get('run_id')
             response = self._core_query({
                 'program': {'cmd': 'stop', 'program_id': program_id_int},
             })
             if str(response.get('result', '')).lower() not in ('ok', 'true'):
                 return f'ERROR: {response.get("error", "stop failed")}', self._experiment_banner()
             self._sweep.reset()
+            if run_id is not None:
+                self._schedule_run_charts_on_finish(program_id_int, int(run_id))
             return f'Program {program_id_int} stopped.', self._experiment_banner()
         except Exception as exc:
             return f'ERROR: {exc}', self._experiment_banner()
@@ -1549,7 +1523,7 @@ class WebHMINode(Node):
         with self._lock:
             prog = dict(self._core_program_status)
             core = dict(self._last_core_snapshot.get('temperature_control') or {})
-        timing = prog.get('timing') or experiment_timing(ExperimentState())
+        timing = prog.get('timing') or IDLE_EXPERIMENT_TIMING
         mode = str(prog.get('mode') or 'idle')
         if mode == 'idle' and core.get('enabled'):
             mode = 'stabilize'
@@ -1578,12 +1552,18 @@ class WebHMINode(Node):
         try:
             with self._lock:
                 program_id = self._core_program_status.get('program_id')
+                run_id = self._core_program_status.get('run_id')
+            if program_id is not None:
+                msg, banner = self.ui_stop_program_by_id(float(program_id))
+                if str(msg).startswith('ERROR'):
+                    return msg, banner
+                if run_id is not None:
+                    self._schedule_run_charts_on_finish(int(program_id), int(run_id))
+                return msg, banner
             response = self._core_query({'program': {'cmd': 'stop_all'}})
             if str(response.get('result', '')).lower() not in ('ok', 'true'):
                 return f'ERROR: {response.get("error", "stop failed")}', self._experiment_banner()
             self._sweep.reset()
-            if program_id is not None:
-                return f'Program {program_id} stopped.', self._experiment_banner()
             return 'No active program. Control disabled.', self._experiment_banner()
         except Exception as exc:
             return f'ERROR: {exc}', self._experiment_banner()
@@ -1655,9 +1635,13 @@ class WebHMINode(Node):
                 return None, result.get('error', 'export failed')
             self._log(f'Exported program {program_id_int} -> {result["zip_path"]}')
             charts_note = f', {len(result.get("chart_files", []))} chart(s)' if result.get('chart_files') else ''
+            trunc_note = ''
+            if result.get('truncated_runs'):
+                trunc_note = f' (truncated {len(result["truncated_runs"])} run(s) — see meta.json)'
             return result['zip_path'], (
                 f'Export OK: {result["measurement_count"]} measurements in '
-                f'{result.get("run_count", 0)} run file(s), {result["step_count"]} steps{charts_note}.'
+                f'{result.get("run_count", 0)} run file(s), {result["step_count"]} steps'
+                f'{charts_note}{trunc_note}.'
             )
         except Exception as exc:
             return None, f'ERROR: {exc}'
@@ -2056,8 +2040,12 @@ class WebHMINode(Node):
             label = result.get('run_label', f'{pid}.{rid}')
             self._log(f'Exported run {label} -> {result["zip_path"]}')
             charts_note = f', {len(result.get("chart_files", []))} chart(s)' if result.get('chart_files') else ''
+            trunc_note = ''
+            if result.get('truncated_runs'):
+                trunc_note = ' (row limit applied — see meta.json)'
             return result['zip_path'], (
-                f'Export ready: run {label}, {result["measurement_count"]} measurement(s){charts_note}.'
+                f'Export ready: run {label}, {result["measurement_count"]} measurement(s)'
+                f'{charts_note}{trunc_note}.'
             )
         except Exception as exc:
             return None, f'ERROR: {exc}'
@@ -2420,15 +2408,6 @@ class WebHMINode(Node):
             return self._steps_table(program_id), f'Removed step {int(step_id)}.'
         except Exception as exc:
             return [], f'ERROR: {exc}'
-
-    def ui_start_program_from_edit(self) -> Tuple[str, str]:
-        program_id = self._active_program_id()
-        msg, banner = self.ui_start_program(float(program_id))
-        return banner, msg
-
-    def ui_stop_program_from_edit(self) -> Tuple[str, str]:
-        msg, banner = self.ui_stop_program()
-        return banner, msg
 
     def launch_web(self) -> None:
         import uvicorn

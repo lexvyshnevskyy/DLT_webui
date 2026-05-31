@@ -151,14 +151,14 @@ async def program_view(request: Request, id: int = Query(0), msg: str = Query(''
 @router.post('/program-view/run')
 async def program_view_run(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
-    msg, _banner = node.ui_start_program(float(id))
+    msg, _banner = await run_blocking(node.ui_start_program, float(id))
     return RedirectResponse(url=f'/program-view?id={id}&msg={quote(msg)}', status_code=303)
 
 
 @router.post('/program-view/stop')
 async def program_view_stop(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
-    msg, _banner = node.ui_stop_program_by_id(float(id))
+    msg, _banner = await run_blocking(node.ui_stop_program_by_id, float(id))
     return RedirectResponse(url=f'/program-view?id={id}&msg={quote(msg)}', status_code=303)
 
 
@@ -362,15 +362,15 @@ async def program_edit_remove_step(request: Request, id: int = Form(...), step_i
 async def program_edit_run(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
     node.ui_programs_set_nav(id)
-    msg, _banner = node.ui_start_program(float(id))
+    msg, _banner = await run_blocking(node.ui_start_program, float(id))
     return RedirectResponse(url=f'/program-edit?id={id}&msg={quote(msg)}', status_code=303)
 
 
 @router.post('/program-edit/stop')
 async def program_edit_stop(request: Request, id: int = Form(...)) -> RedirectResponse:
     _, node = _tpl(request)
-    node.ui_stop_program()
-    return RedirectResponse(url=f'/program-edit?id={id}', status_code=303)
+    msg, _banner = await run_blocking(node.ui_stop_program_by_id, float(id))
+    return RedirectResponse(url=f'/program-edit?id={id}&msg={quote(msg)}', status_code=303)
 
 
 @router.post('/programs/delete')

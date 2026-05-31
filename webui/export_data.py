@@ -34,10 +34,11 @@ def _write_csv(path: Path, headers: List[str], rows: List[List[Any]]) -> None:
         writer.writerows(rows)
 
 
-def _label_slug(label: str, *, program_id: int, run_index: int) -> str:
+def _label_slug(label: str, *, program_id: int, run_index: int, run_id: int) -> str:
     text = str(label or '').strip() or f'{program_id}.{run_index}'
     slug = re.sub(r'[^\w.\-]+', '_', text)
-    return slug or f'{program_id}.{run_index}'
+    base = slug or f'{program_id}.{run_index}'
+    return f'{base}_run{int(run_id)}'
 
 
 def _measurement_rows_to_csv(measurements: List[Dict[str, Any]]) -> List[List[Any]]:
@@ -134,6 +135,8 @@ def _export_runs_measurements(
 ) -> Dict[str, Any]:
     total_measurements = 0
     chart_files: List[str] = []
+    truncated_runs: List[Dict[str, Any]] = []
+    errors: List[str] = []
     for run in runs:
         run_id = int(run.get('run_id', 0) or 0)
         if run_id <= 0:
@@ -142,15 +145,36 @@ def _export_runs_measurements(
             continue
         run_index = int(run.get('run_index', 0) or 0)
         label = str(run.get('label') or f'{program_id}.{run_index}')
-        slug = _label_slug(label, program_id=program_id, run_index=run_index)
+        slug = _label_slug(label, program_id=program_id, run_index=run_index, run_id=run_id)
         measurements = _load_run_measurements(db_query, run_id, program_id)
-        if limit > 0 and len(measurements) > limit:
+        total_loaded = len(measurements)
+        if limit > 0 and total_loaded > limit:
+            truncated_runs.append({
+                'run_id': run_id,
+                'label': label,
+                'exported_rows': limit,
+                'total_rows': total_loaded,
+            })
             measurements = measurements[:limit]
         csv_name = f'measurements_{slug}.csv'
         _write_csv(work_dir / csv_name, MEASUREMENT_HEADERS, _measurement_rows_to_csv(measurements))
         total_measurements += len(measurements)
         chart_files.extend(_copy_run_charts(work_dir, charts_root, program_id, run_id, slug))
-    return {'measurement_count': total_measurements, 'chart_files': chart_files}
+    return {
+        'measurement_count': total_measurements,
+        'chart_files': chart_files,
+        'truncated_runs': truncated_runs,
+        'errors': errors,
+    }
+
+
+def _collect_db_errors(responses: Dict[str, Dict[str, Any]]) -> List[str]:
+    errors: List[str] = []
+    for name, resp in responses.items():
+        if resp.get('result') != 'Ok':
+            detail = resp.get('error', 'failed')
+            errors.append(f'{name}: {detail}')
+    return errors
 
 
 def _finalize_zip(work_dir: Path, export_root: Path, zip_basename: str) -> str:
@@ -186,6 +210,16 @@ def export_program_archive(
     runs_resp = db_query({'cmd': 'program_run_list', 'program_id': program_id})
     e720_resp = db_query({'cmd': 'get_e720', 'id': program_id})
 
+    db_errors = _collect_db_errors({
+        'get_program_by_id': program_info,
+        'get_program_detail': detail_resp,
+        'program_step_list': steps_resp,
+        'program_run_list': runs_resp,
+    })
+    if db_errors:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return {'ok': False, 'error': '; '.join(db_errors)}
+
     program_detail = detail_resp.get('row', {}) if detail_resp.get('result') == 'Ok' else {}
     runs = runs_resp.get('row', []) if runs_resp.get('result') == 'Ok' else []
 
@@ -193,13 +227,13 @@ def export_program_archive(
         'program_id': program_id,
         'exported_at': datetime.now().isoformat(),
         'export_scope': 'program_all_runs',
+        'measurement_row_limit': limit,
         'program': program_info,
         'program_detail': program_detail,
         'e720_config': e720_resp.get('row', {}),
         'measurement_stats': stats_resp.get('row', stats_resp),
         'experiment_runs': runs,
     }
-    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
 
     _write_program_csv(work_dir, program_info)
     step_count = _write_program_steps_csv(work_dir, steps_resp)
@@ -214,6 +248,14 @@ def export_program_archive(
         limit=limit,
     )
 
+    meta['truncated_runs'] = per_run.get('truncated_runs', [])
+    if meta['truncated_runs']:
+        meta['warnings'] = [
+            f"Run {item['label']}: exported {item['exported_rows']} of {item['total_rows']} rows (limit {limit})"
+            for item in meta['truncated_runs']
+        ]
+    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
+
     zip_path = _finalize_zip(work_dir, export_root, f'program_{program_id}_{stamp}.zip')
     run_count = len(runs)
     return {
@@ -223,6 +265,7 @@ def export_program_archive(
         'step_count': step_count,
         'run_count': run_count,
         'chart_files': per_run['chart_files'],
+        'truncated_runs': per_run.get('truncated_runs', []),
         'error': '',
     }
 
@@ -248,7 +291,8 @@ def export_run_archive(
         return {'ok': False, 'error': 'run does not belong to this program'}
 
     label = str(run_row.get('label') or f'{program_id}.{run_row.get("run_index", 0)}')
-    slug = _label_slug(label, program_id=program_id, run_index=int(run_row.get('run_index', 0) or 0))
+    run_index = int(run_row.get('run_index', 0) or 0)
+    slug = _label_slug(label, program_id=program_id, run_index=run_index, run_id=int(run_id))
     work_dir = export_root / f'program_{program_id}_run_{slug}_{stamp}'
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -262,22 +306,16 @@ def export_run_archive(
         'run_id': int(run_id),
     })
 
-    program_detail = detail_resp.get('row', {}) if detail_resp.get('result') == 'Ok' else {}
+    db_errors = _collect_db_errors({
+        'get_program_by_id': program_info,
+        'get_program_detail': detail_resp,
+        'program_step_list': steps_resp,
+    })
+    if db_errors:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return {'ok': False, 'error': '; '.join(db_errors)}
 
-    meta = {
-        'program_id': program_id,
-        'run_id': int(run_id),
-        'run_label': label,
-        'exported_at': datetime.now().isoformat(),
-        'export_scope': 'single_run',
-        'program': program_info,
-        'program_detail': program_detail,
-        'experiment_run': run_row,
-        'e720_config': e720_resp.get('row', {}),
-        'measurement_stats': stats_resp.get('row', stats_resp),
-    }
-    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
-    (work_dir / 'experiment_run.json').write_text(json.dumps(run_row, indent=2, default=str), encoding='utf-8')
+    program_detail = detail_resp.get('row', {}) if detail_resp.get('result') == 'Ok' else {}
 
     _write_program_csv(work_dir, program_info)
     step_count = _write_program_steps_csv(work_dir, steps_resp)
@@ -292,6 +330,28 @@ def export_run_archive(
         only_run_id=int(run_id),
     )
 
+    meta = {
+        'program_id': program_id,
+        'run_id': int(run_id),
+        'run_label': label,
+        'exported_at': datetime.now().isoformat(),
+        'export_scope': 'single_run',
+        'measurement_row_limit': limit,
+        'program': program_info,
+        'program_detail': program_detail,
+        'experiment_run': run_row,
+        'e720_config': e720_resp.get('row', {}),
+        'measurement_stats': stats_resp.get('row', stats_resp),
+        'truncated_runs': per_run.get('truncated_runs', []),
+    }
+    if meta['truncated_runs']:
+        meta['warnings'] = [
+            f"Run {item['label']}: exported {item['exported_rows']} of {item['total_rows']} rows (limit {limit})"
+            for item in meta['truncated_runs']
+        ]
+    (work_dir / 'meta.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
+    (work_dir / 'experiment_run.json').write_text(json.dumps(run_row, indent=2, default=str), encoding='utf-8')
+
     zip_path = _finalize_zip(work_dir, export_root, f'program_{program_id}_run_{slug}_{stamp}.zip')
     return {
         'ok': True,
@@ -301,5 +361,6 @@ def export_run_archive(
         'run_count': 1,
         'run_label': label,
         'chart_files': per_run['chart_files'],
+        'truncated_runs': per_run.get('truncated_runs', []),
         'error': '',
     }

@@ -424,6 +424,32 @@ class WebHMINode(Node):
             timeout_sec=timeout_sec,
         )
 
+    def _merge_core_snapshot(self, incoming: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge a /core/query response into cached state without dropping pwm/tc sections."""
+        merged = dict(self._last_core_snapshot)
+        for key in (
+            'result',
+            'error',
+            'program_scheduler_note',
+            'hmi_published',
+            'database_service_ready',
+        ):
+            if key in incoming:
+                merged[key] = incoming[key]
+        if 'measurements' in incoming:
+            merged['measurements'] = incoming['measurements']
+        program = incoming.get('program')
+        if program is not None:
+            merged['program'] = program
+            self._core_program_status = dict(program)
+        tc = incoming.get('temperature_control')
+        if tc is not None:
+            merged['temperature_control'] = tc
+        pwm = incoming.get('pwm')
+        if pwm is not None:
+            merged['pwm'] = pwm
+        return merged
+
     def _core_query(self, payload: Dict[str, Any], *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
         if timeout_sec is None:
             if payload.get('program') is not None:
@@ -438,7 +464,7 @@ class WebHMINode(Node):
             timeout_sec=timeout_sec,
         )
         with self._lock:
-            self._last_core_snapshot = result
+            self._last_core_snapshot = self._merge_core_snapshot(result)
         return result
 
     def _service_available(self, client: Any, timeout_sec: float = 0.05) -> bool:
@@ -630,15 +656,6 @@ class WebHMINode(Node):
             response = self._core_query({}, timeout_sec=min(2.0, self.core_service_timeout_sec))
             if str(response.get('result', '')).lower() not in ('ok', 'true'):
                 return
-            with self._lock:
-                snap = dict(self._last_core_snapshot)
-                tc = response.get('temperature_control')
-                pwm = response.get('pwm')
-                if tc is not None:
-                    snap['temperature_control'] = tc
-                if pwm is not None:
-                    snap['pwm'] = pwm
-                self._last_core_snapshot = snap
         except Exception:
             pass
 

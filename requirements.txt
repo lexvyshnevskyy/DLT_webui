@@ -5,3 +5,4 @@ python-multipart>=0.0.9
 psutil>=5.9.0
 mysql-connector-python>=8.0.0
 matplotlib>=3.7.0
+markdown>=3.5.0

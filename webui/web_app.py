@@ -15,7 +15,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from webui.i18n import COOKIE_NAME, _, bind_locale, get_locale, resolve_locale
 from webui.web_paths import static_dir, templates_dir
-from webui.routes import config, dashboard, experiment, programs
+from webui.routes import config, dashboard, docs, experiment, programs
 
 if TYPE_CHECKING:
     from webui.node import WebHMINode
@@ -109,6 +109,7 @@ def create_app(node: 'WebHMINode') -> FastAPI:
     app.include_router(programs.router)
     app.include_router(experiment.router)
     app.include_router(config.router)
+    app.include_router(docs.router)
 
     # Live dashboard endpoints on the app factory (not only the router) so a stale
     # install/webui/.../routes/dashboard.py cannot drop them after partial sync.

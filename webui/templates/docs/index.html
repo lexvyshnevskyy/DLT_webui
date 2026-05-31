@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="/static/docs.css">
+{% endblock %}
+{% block title %}{{ _('nav.docs') }}{% endblock %}
+{% block content %}
+<div class="docs-layout">
+  <aside class="docs-sidebar">
+    <p class="docs-lang-switch">
+      <a href="/docs/{{ doc_lang }}" class="active">{{ doc_lang|upper }}</a>
+      ·
+      <a href="/docs/{{ other_lang }}">{{ _('docs.other_language') }}</a>
+    </p>
+    <nav class="docs-nav" aria-label="Documentation">
+      <ul>
+        {% for p in pages %}
+        <li><a href="/docs/{{ doc_lang }}/{{ p.slug }}">{{ p.title }}</a></li>
+        {% endfor %}
+      </ul>
+    </nav>
+  </aside>
+  <article class="docs-main doc-content">
+    <h1>{{ _('nav.docs') }}</h1>
+    <p>{{ _('docs.index_intro') }}</p>
+    <ol class="docs-toc">
+      {% for p in pages %}
+      <li><a href="/docs/{{ doc_lang }}/{{ p.slug }}">{{ p.title }}</a></li>
+      {% endfor %}
+    </ol>
+  </article>
+</div>
+{% endblock %}

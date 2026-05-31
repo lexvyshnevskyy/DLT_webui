@@ -178,6 +178,7 @@ class WebHMINode(Node):
         self.create_subscription(String, self.experiment_status_topic, self._on_core_experiment_status, 10)
 
         self._sweep = E720SweepController()
+        self._sweep_loaded_program_id: Optional[int] = None
         self._core_program_status: Dict[str, Any] = {}
         self._program_was_running: bool = False
 
@@ -210,6 +211,8 @@ class WebHMINode(Node):
             self._refresh_programs_cache,
         )
         self._control_timer = self.create_timer(self.control_loop_period_sec, self._control_tick)
+        self._bootstrap_done = False
+        self._bootstrap_timer = self.create_timer(2.0, self._bootstrap_active_program_state)
         self._log('webui node started')
         self._refresh_programs_cache()
 
@@ -293,6 +296,9 @@ class WebHMINode(Node):
         if ended is not None:
             pid, rid = ended
             self._schedule_run_charts(rid, pid)
+            self._clear_e720_sweep_runtime()
+        elif program.get('program_id') is not None:
+            self._ensure_e720_sweep_for_running_program()
 
     def _is_program_running(self) -> bool:
         with self._lock:
@@ -514,6 +520,39 @@ class WebHMINode(Node):
         except Exception as exc:
             self._log(f'Could not load E7-20 config for program {program_id}: {exc}')
 
+    def _clear_e720_sweep_runtime(self) -> None:
+        self._sweep.reset()
+        with self._lock:
+            self._sweep_loaded_program_id = None
+
+    def _ensure_e720_sweep_for_running_program(self) -> None:
+        """Load E7-20 sweep from DB when core runs a program (start, restart, or HMI)."""
+        with self._lock:
+            raw_pid = self._core_program_status.get('program_id')
+            loaded_pid = self._sweep_loaded_program_id
+        if raw_pid is None:
+            if loaded_pid is not None:
+                self._clear_e720_sweep_runtime()
+            return
+        program_id = int(raw_pid)
+        if program_id <= 0 or loaded_pid == program_id:
+            return
+        self._load_e720_config_for_program(program_id)
+        with self._lock:
+            self._sweep_loaded_program_id = program_id
+        self._log(f'Loaded E7-20 sweep for active program {program_id}')
+
+    def _bootstrap_active_program_state(self) -> None:
+        if self._bootstrap_done:
+            return
+        self._bootstrap_done = True
+        try:
+            self._bootstrap_timer.cancel()
+        except Exception:
+            pass
+        self._sync_core_program_status()
+        self._ensure_e720_sweep_for_running_program()
+
     def _publish_e720_byte(self, byte_val: int) -> None:
         msg = UInt8()
         msg.data = int(byte_val) & 0xFF
@@ -658,9 +697,10 @@ class WebHMINode(Node):
                 self._program_was_running = running
 
             if was_running and not running:
-                self._sweep.reset()
+                self._clear_e720_sweep_runtime()
 
             if running:
+                self._ensure_e720_sweep_for_running_program()
                 sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
                 cmd = sweep_result.get('command_byte')
                 if cmd is not None:
@@ -1463,7 +1503,6 @@ class WebHMINode(Node):
             return self._core_unavailable_message(), self._experiment_banner()
         program_id_int = int(program_id)
         try:
-            self._load_e720_config_for_program(program_id_int)
             response = self._core_query({
                 'program': {'cmd': 'start', 'program_id': program_id_int},
             })
@@ -1473,6 +1512,7 @@ class WebHMINode(Node):
             with self._lock:
                 self._core_program_status = dict(prog)
                 self._program_was_running = True
+            self._ensure_e720_sweep_for_running_program()
             self._sweep.reset()
             run_index = prog.get('run_index')
             label = prog.get('run_label') or f'{program_id_int}.{run_index or "?"}'
@@ -1505,6 +1545,7 @@ class WebHMINode(Node):
                 )
             except Exception:
                 pass
+        self._ensure_e720_sweep_for_running_program()
         with self._lock:
             prog = dict(self._core_program_status)
             core = dict(self._last_core_snapshot.get('temperature_control') or {})

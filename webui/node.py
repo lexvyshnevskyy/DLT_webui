@@ -1682,6 +1682,9 @@ class WebHMINode(Node):
             response = self._core_query({'temperature_control': tc_payload})
             if str(response.get('result', '')).lower() in ('false', 'error'):
                 return str(response.get('error', 'Core rejected temperature control'))
+            scheduler_note = str(response.get('program_scheduler_note', '') or '')
+            if enabled and scheduler_note:
+                return f'ERROR: {scheduler_note}'
             tc = response.get('temperature_control')
             if enabled and not tc:
                 return (

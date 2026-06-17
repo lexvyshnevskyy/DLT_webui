@@ -1,6 +1,6 @@
 # webui
 
-FastAPI browser HMI (port 80): dashboard, programs, experiment, configuration, **documentation browser** at `/docs`.
+FastAPI browser HMI (port 80): dashboard, programs (experiment modes), experiment, configuration (impedance source, IM3536), **documentation browser** at `/docs`.
 
 **Full documentation:** [docs/en/webui.md](../../docs/en/webui.md) · [docs/uk/webui.md](../../docs/uk/webui.md)
 
@@ -11,3 +11,5 @@ ros2 launch webui webui.launch.py
 ```
 
 Service: `delatometry-webui.service`. Nextion display is package **`hmi`**, not this package.
+
+**Документація українською:** [docs/uk/webui.md](../../docs/uk/webui.md)

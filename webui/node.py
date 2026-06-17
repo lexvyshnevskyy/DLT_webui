@@ -21,7 +21,13 @@ from std_msgs.msg import String, UInt8
 from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops, vpn_config
 from webui.param_utils import ros_param_bool
 from webui.program_steps import parse_step_field_updates
-from webui.temperature_validation import suggest_next_step, validate_new_program, validate_temperature_steps
+from webui.temperature_validation import (
+    EXPERIMENT_MODE_LABELS,
+    normalize_experiment_mode,
+    suggest_next_step,
+    validate_new_program,
+    validate_temperature_steps,
+)
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
 from webui.program_schedule import IDLE_EXPERIMENT_TIMING, ProgramStep, parse_program_steps
@@ -189,6 +195,7 @@ class WebHMINode(Node):
         self._new_program_draft: List[List[Any]] = []
         self._new_program_description: str = ''
         self._new_program_sweep_mode: int = 0
+        self._new_program_experiment_mode: str = 'default'
         self._new_program_enabled_freqs: List[str] = ['1000']
         self._new_program_range_max: float = 10000.0
         self._last_topic_peek: Dict[str, str] = {}
@@ -775,12 +782,18 @@ class WebHMINode(Node):
         total = timing.get('step_count', '?')
         target = prog.get('last_target_k')
         mode = SWEEP_MODE_LABELS.get(self._sweep.config.mode, 'unknown')
+        exp_mode = normalize_experiment_mode(str(prog.get('experiment_mode', 'default')))
+        exp_label = EXPERIMENT_MODE_LABELS.get(exp_mode, exp_mode)
         label = prog.get('run_label') or program_id
+        if exp_mode == 'default':
+            return (
+                f'RUNNING {label} — step {step}/{total}, '
+                f'target {target:.2f} K, E7-20 mode: {mode}'
+                if target is not None
+                else f'RUNNING {label} — step {step}/{total}, E7-20 mode: {mode}'
+            )
         return (
-            f'RUNNING {label} — step {step}/{total}, '
-            f'target {target:.2f} K, E7-20 mode: {mode}'
-            if target is not None
-            else f'RUNNING {label} — step {step}/{total}, E7-20 mode: {mode}'
+            f'RUNNING {label} — step {step}/{total}, {exp_label}, E7-20 mode: {mode}'
         )
 
     def _is_ltm_temperature(self, item: Dict[str, Any]) -> bool:
@@ -1589,6 +1602,7 @@ class WebHMINode(Node):
         program_id = prog.get('program_id')
         return {
             'mode': mode,
+            'experiment_program_mode': normalize_experiment_mode(str(prog.get('experiment_mode', 'default'))),
             'banner': self._experiment_banner(),
             'program_id': program_id,
             'run_id': prog.get('run_id'),
@@ -1882,6 +1896,7 @@ class WebHMINode(Node):
         return {
             'banner': status['banner'],
             'experiment_mode': status['mode'],
+            'experiment_program_mode': status.get('experiment_program_mode', 'default'),
             'run_label': status.get('run_label'),
             'timing': status['timing'],
             'measurements': self._measurements_table(),
@@ -1903,6 +1918,7 @@ class WebHMINode(Node):
             self._new_program_draft = []
             self._new_program_description = ''
             self._new_program_sweep_mode = 0
+            self._new_program_experiment_mode = 'default'
             self._new_program_enabled_freqs = ['1000']
             self._new_program_range_max = 10000.0
 
@@ -1910,6 +1926,7 @@ class WebHMINode(Node):
         with self._lock:
             return {
                 'description': self._new_program_description,
+                'experiment_mode': self._new_program_experiment_mode,
                 'sweep_mode': self._new_program_sweep_mode,
                 'enabled_freqs': list(self._new_program_enabled_freqs),
                 'range_max': self._new_program_range_max,
@@ -1918,6 +1935,7 @@ class WebHMINode(Node):
     def set_new_program_draft_meta(
         self,
         description: Optional[str] = None,
+        experiment_mode: Optional[str] = None,
         sweep_mode: Optional[int] = None,
         enabled_freqs: Optional[List[str]] = None,
         range_max: Optional[float] = None,
@@ -1925,6 +1943,8 @@ class WebHMINode(Node):
         with self._lock:
             if description is not None:
                 self._new_program_description = str(description).strip()
+            if experiment_mode is not None:
+                self._new_program_experiment_mode = normalize_experiment_mode(str(experiment_mode))
             if sweep_mode is not None:
                 self._new_program_sweep_mode = int(sweep_mode)
             if enabled_freqs is not None:
@@ -1948,6 +1968,7 @@ class WebHMINode(Node):
             range_max = 10000.0
         self.set_new_program_draft_meta(
             description=str(form.get('description', '') or ''),
+            experiment_mode=str(form.get('experiment_mode', 'default') or 'default'),
             sweep_mode=sweep_mode,
             enabled_freqs=list(enabled),
             range_max=range_max,
@@ -1966,9 +1987,10 @@ class WebHMINode(Node):
     def add_new_program_draft_step(self, t_start: float, t_stop: float, minutes: float) -> str:
         with self._lock:
             draft = [list(row) for row in self._new_program_draft]
+            experiment_mode = self._new_program_experiment_mode
         next_id = len(draft) + 1
         candidate = draft + [[next_id, float(t_start), float(t_stop), float(minutes)]]
-        ok, issues = validate_temperature_steps(candidate)
+        ok, issues = validate_temperature_steps(candidate, experiment_mode=experiment_mode)
         if not ok:
             return issues[0].message if issues else 'Invalid temperature step.'
         with self._lock:
@@ -1989,13 +2011,28 @@ class WebHMINode(Node):
         mode: int,
         enabled_freqs: List[str],
         range_max: float,
+        experiment_mode: str = 'default',
     ) -> str:
         with self._lock:
             draft = [list(row) for row in self._new_program_draft]
-        check = validate_new_program(description, draft, int(mode), enabled_freqs, float(range_max))
+        check = validate_new_program(
+            description,
+            draft,
+            int(mode),
+            enabled_freqs,
+            float(range_max),
+            experiment_mode=experiment_mode,
+        )
         if not check.can_create:
             return check.issues[0].message if check.issues else 'Cannot create program.'
-        return self.ui_program_create_save_new_page(description, draft, float(mode), enabled_freqs, range_max)
+        return self.ui_program_create_save_new_page(
+            description,
+            draft,
+            float(mode),
+            enabled_freqs,
+            range_max,
+            experiment_mode=experiment_mode,
+        )
 
     # --- Programs ---
     def ui_programs_set_nav(self, program_id: int) -> None:
@@ -2121,6 +2158,7 @@ class WebHMINode(Node):
                 'status': '',
                 'steps': [],
                 'sweep_mode': 0,
+                'experiment_mode': 'default',
                 'enabled_freqs': ['1000'],
                 'range_max': 10000.0,
                 'run_status': self._experiment_banner(),
@@ -2147,11 +2185,13 @@ class WebHMINode(Node):
                 for s in row.get('steps', [])
             ]
             self._load_e720_config_for_program(pid)
+            meta = row.get('meta') if isinstance(row.get('meta'), dict) else {}
             return {
                 'header': f"Program {row['id']} — {row['datetime']} — status: {row['status']}",
                 'description': str(row.get('description') or ''),
                 'status': str(row.get('status') or ''),
                 'steps': steps,
+                'experiment_mode': normalize_experiment_mode(str(meta.get('experiment_mode', 'default'))),
                 'sweep_mode': int(e720.get('param', 0) or 0),
                 'enabled_freqs': enabled,
                 'range_max': float(cfg_raw.get('range_max_hz', 10000) or 10000),
@@ -2164,6 +2204,7 @@ class WebHMINode(Node):
                 'status': '',
                 'steps': [],
                 'sweep_mode': 0,
+                'experiment_mode': 'default',
                 'enabled_freqs': ['1000'],
                 'range_max': 10000.0,
                 'run_status': f'ERROR: {exc}',
@@ -2263,6 +2304,7 @@ class WebHMINode(Node):
         mode: float,
         enabled_freqs: List[str],
         range_max: float,
+        experiment_mode: str = 'default',
     ) -> str:
         if not self._db_available():
             return self._database_unavailable_message()
@@ -2286,6 +2328,12 @@ class WebHMINode(Node):
                 'program_id': program_id,
                 'key': 'description',
                 'value': str(description or '').strip(),
+            })
+            self._db_query({
+                'cmd': 'set_program_meta',
+                'program_id': program_id,
+                'key': 'experiment_mode',
+                'value': normalize_experiment_mode(experiment_mode),
             })
             freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
             config = E720SweepConfig(
@@ -2407,6 +2455,7 @@ class WebHMINode(Node):
         enabled_freqs: List[str],
         range_max: float,
         step_updates: Optional[Dict[int, Dict[str, float]]] = None,
+        experiment_mode: str = 'default',
     ) -> str:
         if not self._db_available():
             return self._database_unavailable_message()
@@ -2425,6 +2474,14 @@ class WebHMINode(Node):
             })
             if meta_resp.get('result') != 'Ok':
                 return f'ERROR: {meta_resp.get("error", "description save failed")}'
+            mode_resp = self._db_query({
+                'cmd': 'set_program_meta',
+                'program_id': program_id,
+                'key': 'experiment_mode',
+                'value': normalize_experiment_mode(experiment_mode),
+            })
+            if mode_resp.get('result') != 'Ok':
+                return f'ERROR: {mode_resp.get("error", "experiment mode save failed")}'
             freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
             config = E720SweepConfig(
                 mode=int(mode),

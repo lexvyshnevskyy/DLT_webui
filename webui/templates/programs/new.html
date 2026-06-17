@@ -41,6 +41,20 @@
     </label>
   </section>
 
+  <section class="card program-wizard-section" id="section-experiment-mode">
+    <div class="section-head">
+      <h2>{{ _('program_new.section_experiment_mode') }}</h2>
+    </div>
+    <p class="muted">{{ _('program_new.experiment_mode_hint') }}</p>
+    <label>{{ _('program_new.experiment_mode') }}
+      <select name="experiment_mode" id="experiment-mode">
+        {% for label, key in experiment_modes %}
+        <option value="{{ key }}"{% if key == experiment_mode %} selected{% endif %}>{{ _(label) }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </section>
+
   <section class="card program-wizard-section" id="section-steps">
     <div class="section-head">
       <h2>{{ _('program_new.section_steps') }}</h2>

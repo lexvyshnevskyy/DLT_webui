@@ -26,6 +26,14 @@ def _tpl(request: Request):
     return request.app.state.templates, request.app.state.node
 
 
+def _experiment_mode_choices():
+    return [
+        ('program_new.experiment_mode.default', 'default'),
+        ('program_new.experiment_mode.measure_only', 'measure_only'),
+        ('program_new.experiment_mode.measure_ltm', 'measure_ltm'),
+    ]
+
+
 def _e720_choices():
     return {
         'modes': translate_e720_modes(),
@@ -60,6 +68,8 @@ async def program_new_form(request: Request, msg: str = Query(''), new: int = Qu
         {
             'title': node.title,
             'description': meta['description'],
+            'experiment_mode': meta.get('experiment_mode', 'default'),
+            'experiment_modes': _experiment_mode_choices(),
             'steps': node.get_new_program_draft(),
             'message': msg,
             'e720': _e720_choices(),
@@ -85,6 +95,7 @@ async def program_new_validate(request: Request) -> JSONResponse:
         int(form.get('sweep_mode', 0) or 0),
         enabled,
         float(form.get('range_max', 10000) or 10000),
+        experiment_mode=str(form.get('experiment_mode', 'default') or 'default'),
     )
     return JSONResponse(translate_validation_result(result))
 
@@ -118,6 +129,7 @@ async def program_new_remove_step(request: Request, step_id: int = Form(...)) ->
 async def program_new_create(
     request: Request,
     description: str = Form(''),
+    experiment_mode: str = Form('default'),
     sweep_mode: int = Form(0),
     enabled_freqs: List[str] = Form(default=[]),
     range_max: float = Form(10000),
@@ -125,7 +137,13 @@ async def program_new_create(
     _, node = _tpl(request)
     form = await request.form()
     node.sync_new_program_draft_from_form(form)
-    msg = node.ui_program_create_from_draft(description, sweep_mode, enabled_freqs, range_max)
+    msg = node.ui_program_create_from_draft(
+        description,
+        sweep_mode,
+        enabled_freqs,
+        range_max,
+        experiment_mode=experiment_mode,
+    )
     if not msg.startswith('Program '):
         return RedirectResponse(url=f'/program-new?msg={quote(msg)}', status_code=303)
     return RedirectResponse(url=f'/programs?msg={quote(msg)}&refresh=1', status_code=303)
@@ -279,6 +297,7 @@ async def program_edit_form(request: Request, id: int = Query(0), msg: str = Que
             'program_id': id,
             'message': msg,
             'e720': _e720_choices(),
+            'experiment_modes': _experiment_mode_choices(),
             'default_step': default_step,
             't_limits': {'t_min_k': T_MIN_K, 't_max_k': T_MAX_K},
             **fields,
@@ -291,6 +310,7 @@ async def program_edit_save(
     request: Request,
     id: int = Form(...),
     description: str = Form(''),
+    experiment_mode: str = Form('default'),
     sweep_mode: int = Form(0),
     enabled_freqs: List[str] = Form(default=[]),
     range_max: float = Form(10000),
@@ -299,7 +319,14 @@ async def program_edit_save(
     node.ui_programs_set_nav(id)
     form = await request.form()
     step_updates = parse_step_field_updates(form)
-    msg = node.ui_program_edit_save(description, sweep_mode, enabled_freqs, range_max, step_updates)
+    msg = node.ui_program_edit_save(
+        description,
+        sweep_mode,
+        enabled_freqs,
+        range_max,
+        step_updates,
+        experiment_mode=experiment_mode,
+    )
     return RedirectResponse(url=f'/program-edit?id={id}&msg={msg}', status_code=303)
 
 

@@ -6,6 +6,14 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+EXPERIMENT_MODES = ('default', 'measure_only', 'measure_ltm')
+
+EXPERIMENT_MODE_LABELS = {
+    'default': 'Temperature control + measurements',
+    'measure_only': 'Measurements only (timed)',
+    'measure_ltm': 'Measurements + LTM log (timed)',
+}
+
 T_MIN_K = 40.0
 T_MAX_K = 1600.0
 CONTINUITY_EPS_K = 1e-3
@@ -118,7 +126,54 @@ def validate_description(description: str) -> Tuple[bool, List[ValidationIssue]]
     return True, []
 
 
-def validate_temperature_steps(rows: Sequence[Sequence[Any]]) -> Tuple[bool, List[ValidationIssue]]:
+def normalize_experiment_mode(value: str) -> str:
+    normalized = (value or 'default').strip().lower()
+    return normalized if normalized in EXPERIMENT_MODES else 'default'
+
+
+def validate_duration_steps(rows: Sequence[Sequence[Any]]) -> Tuple[bool, List[ValidationIssue]]:
+    issues: List[ValidationIssue] = []
+    steps = normalize_step_rows(rows)
+    if not steps:
+        issues.append(
+            ValidationIssue(
+                code='no_steps',
+                message='Add at least one time segment.',
+            )
+        )
+        return False, issues
+
+    for step_id, t_start, t_stop, minutes in steps:
+        if minutes <= 0:
+            issues.append(
+                ValidationIssue(
+                    step_id=step_id,
+                    field='minutes',
+                    code='minutes_non_positive',
+                    message=f'Step {step_id}: duration must be greater than 0 minutes.',
+                )
+            )
+        if t_start < T_MIN_K or t_stop > T_MAX_K:
+            issues.append(
+                ValidationIssue(
+                    step_id=step_id,
+                    code='temperature_out_of_range',
+                    message=(
+                        f'Step {step_id}: temperatures should stay within '
+                        f'{T_MIN_K:g}–{T_MAX_K:g} K for display consistency.'
+                    ),
+                )
+            )
+    return (len(issues) == 0, issues)
+
+
+def validate_temperature_steps(
+    rows: Sequence[Sequence[Any]],
+    *,
+    experiment_mode: str = 'default',
+) -> Tuple[bool, List[ValidationIssue]]:
+    if normalize_experiment_mode(experiment_mode) != 'default':
+        return validate_duration_steps(rows)
     issues: List[ValidationIssue] = []
     steps = normalize_step_rows(rows)
 
@@ -257,10 +312,11 @@ def validate_new_program(
     sweep_mode: int,
     enabled_freqs: Sequence[str],
     range_max: float,
+    experiment_mode: str = 'default',
 ) -> ProgramValidationResult:
     result = ProgramValidationResult()
     desc_ok, desc_issues = validate_description(description)
-    steps_ok, step_issues = validate_temperature_steps(steps)
+    steps_ok, step_issues = validate_temperature_steps(steps, experiment_mode=experiment_mode)
     e720_ok, e720_issues = validate_e720(sweep_mode, enabled_freqs, range_max)
 
     result.description_ok = desc_ok
@@ -288,6 +344,7 @@ def steps_from_form(form: Mapping[str, Any]) -> List[List[Any]]:
 
 def validate_new_program_form(form: Mapping[str, Any]) -> ProgramValidationResult:
     description = str(form.get('description', '') or '')
+    experiment_mode = normalize_experiment_mode(str(form.get('experiment_mode', 'default')))
     sweep_mode = int(_parse_float(form.get('sweep_mode', 0)) or 0)
     range_max = float(_parse_float(form.get('range_max', 10000)) or 10000)
     enabled = form.getlist('enabled_freqs') if hasattr(form, 'getlist') else []
@@ -298,7 +355,14 @@ def validate_new_program_form(form: Mapping[str, Any]) -> ProgramValidationResul
         elif raw:
             enabled = [raw]
     step_rows = steps_from_form(form)
-    return validate_new_program(description, step_rows, sweep_mode, enabled, range_max)
+    return validate_new_program(
+        description,
+        step_rows,
+        sweep_mode,
+        enabled,
+        range_max,
+        experiment_mode=experiment_mode,
+    )
 
 
 def _main() -> int:
@@ -318,6 +382,7 @@ def _main() -> int:
         int(e720.get('sweep_mode', 0)),
         list(e720.get('enabled_freqs', [])),
         float(e720.get('range_max', 10000)),
+        experiment_mode=str(payload.get('experiment_mode', 'default')),
     )
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.can_create else 1

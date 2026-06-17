@@ -198,6 +198,12 @@
   "config.vpn_disconnect": "Disconnect",
   "config.vpn_boot_service": "Boot service enabled",
   "config.vpn_pkg_missing": "not installed",
+  "config.serial_ports": "Serial ports (UART)",
+  "config.serial_ports_hint": "All detected USB/serial devices on this host. Assign each instrument to a different port.",
+  "config.serial_port": "Port",
+  "config.serial_assigned": "Assigned to",
+  "config.serial_unassigned": "—",
+  "config.port_select": "Select port",
 
   "e720.mode.0": "Stationary (hold current frequency)",
   "e720.mode.1": "Cyclic (rotate enabled frequencies)",

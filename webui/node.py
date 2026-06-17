@@ -1066,13 +1066,9 @@ class WebHMINode(Node):
         )
 
     def _hotspot_status_text(self, iface: str = '') -> str:
-        if network_config.hotspot_is_active():
-            active = ''
-            try:
-                active = network_config.HOTSPOT_STATE_FILE.read_text(encoding='utf-8').strip()
-            except OSError:
-                pass
-            return f'Hotspot ACTIVE on {active or iface} — SSID {network_config.HOTSPOT_SSID}'
+        if network_config.hotspot_is_active(iface):
+            active = network_config.get_hotspot_iface() or iface
+            return f'Hotspot ACTIVE on {active} — SSID {network_config.HOTSPOT_SSID}'
         return 'Hotspot off'
 
     def ui_refresh_network(self) -> Tuple[Any, ...]:
@@ -1139,11 +1135,12 @@ class WebHMINode(Node):
         self._log(f'hotspot enable: {msg}')
         return msg, self._hotspot_status_text(str(iface)), network_info.interfaces_table()
 
-    def ui_hotspot_disable(self) -> Tuple[str, str, List[List[Any]]]:
+    def ui_hotspot_disable(self) -> Tuple[str, str, List[List[Any]], str]:
         result = network_config.disable_personal_hotspot(use_sudo=self.network_use_sudo)
         msg = result.get('message') or ('OK' if result.get('ok') else result.get('error', 'failed'))
+        iface = str(result.get('iface') or 'wlan0')
         self._log(f'hotspot disable: {msg}')
-        return msg, self._hotspot_status_text(), network_info.interfaces_table()
+        return msg, self._hotspot_status_text(iface), network_info.interfaces_table(), iface
 
     def ui_vpn_save(
         self,
@@ -1812,6 +1809,7 @@ class WebHMINode(Node):
             'ltm_port_choices': serial_port_choices(snap['ltm2985']['port']),
             'meas_port_choices': serial_port_choices(snap['measure_device']['port']),
             'im3536_port_choices': serial_port_choices(snap['im3536']['port']),
+            'serial_ports_inventory': serial_ports.serial_port_inventory(self.delatometry_env_file),
             'pwm_pins': gpio_pins.bcm_pin_choices(core['pwm_pin_ch1']),
             'hotspot_ssid': network_config.HOTSPOT_SSID,
             'wifi_networks': wifi_rows,

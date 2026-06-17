@@ -103,8 +103,9 @@ async def hotspot_enable(request: Request, iface: str = Form('wlan0')) -> Redire
 @router.post('/configuration/network/hotspot-disable')
 async def hotspot_disable(request: Request) -> RedirectResponse:
     _, node = _tpl(request)
-    msg, _, _ = node.ui_hotspot_disable()
-    return RedirectResponse(url=f'/configuration?iface=wlan0&msg={quote(msg)}', status_code=303)
+    msg, _, _, iface = node.ui_hotspot_disable()
+    redirect_iface = iface or 'wlan0'
+    return RedirectResponse(url=f'/configuration?iface={redirect_iface}&msg={quote(msg)}', status_code=303)
 
 
 def _config_redirect(iface: str, vpn_msg: str = '') -> str:

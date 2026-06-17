@@ -45,11 +45,15 @@ ${RUN_USER} ALL=(root) NOPASSWD: \\
   ${SYSTEMCTL} restart pigpiod.service, \\
   /usr/bin/tee /etc/default/delatometry, \\
   /usr/bin/tee /etc/delatometry/hotspot-dnsmasq.conf, \\
+  /usr/bin/tee /etc/delatometry/wifi-restore.json, \\
   /usr/bin/tee /run/delatometry/hotspot.interface, \\
   /usr/bin/mkdir -p /etc/delatometry, \\
   /usr/bin/mkdir -p /run/delatometry, \\
   /usr/bin/rm -f /etc/delatometry/hotspot-dnsmasq.conf, \\
+  /usr/bin/rm -f /etc/delatometry/wifi-restore.json, \\
   /usr/bin/rm -f /run/delatometry/hotspot.interface, \\
+  /usr/bin/cat /etc/delatometry/wifi-restore.json, \\
+  /usr/bin/chmod 600 /etc/delatometry/wifi-restore.json, \\
   /usr/bin/cat /etc/default/delatometry, \\
   /usr/bin/nmcli, \\
   ${SYSTEMCTL} enable delatometry-hotspot-dnsmasq.service, \\

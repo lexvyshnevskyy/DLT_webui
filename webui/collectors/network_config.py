@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,6 +19,7 @@ HOTSPOT_CONN_PREFIX = 'delatometry-hotspot-'
 DELATOMETRY_ETC = Path('/etc/delatometry')
 HOTSPOT_DNSMASQ_CONF = DELATOMETRY_ETC / 'hotspot-dnsmasq.conf'
 HOTSPOT_STATE_FILE = Path('/run/delatometry/hotspot.interface')
+WIFI_RESTORE_FILE = DELATOMETRY_ETC / 'wifi-restore.json'
 HOTSPOT_DHCP_SERVICE = 'delatometry-hotspot-dnsmasq.service'
 
 
@@ -48,6 +50,28 @@ def _remove_file_sudo(path: Path, use_sudo: bool = True) -> None:
     _sudo(['rm', '-f', str(path)], use_sudo=use_sudo, timeout=15)
 
 
+def _read_file_sudo(path: Path, use_sudo: bool = True) -> str:
+    proc = _sudo(['cat', str(path)], use_sudo=use_sudo, timeout=15)
+    if proc.returncode != 0:
+        return ''
+    return proc.stdout
+
+
+def _connection_fields(name: str, secrets: bool = False, use_sudo: bool = True) -> Dict[str, str]:
+    cmd = ['nmcli', '-t']
+    if secrets:
+        cmd.append('-s')
+    cmd.extend(['connection', 'show', name])
+    proc = _sudo(cmd, use_sudo=use_sudo, timeout=30)
+    fields: Dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if ':' not in line:
+            continue
+        key, _, val = line.partition(':')
+        fields[key] = val
+    return fields
+
+
 def _connection_type(iface: str) -> str:
     info = get_interface(iface)
     if info and info.get('kind') == 'wifi':
@@ -64,8 +88,17 @@ def _connections_on_interface(iface: str) -> List[str]:
         if ':' not in line:
             continue
         name, _, device = line.partition(':')
-        if device.strip() == iface:
-            names.append(name.strip())
+        name = name.strip()
+        device = device.strip()
+        if not name:
+            continue
+        if device == iface:
+            names.append(name)
+            continue
+        if not device:
+            fields = _connection_fields(name, use_sudo=False)
+            if fields.get('connection.interface-name') == iface:
+                names.append(name)
     return names
 
 
@@ -79,14 +112,191 @@ def _hotspot_connection_name(iface: str) -> str:
     return f'{HOTSPOT_CONN_PREFIX}{iface}'
 
 
-def hotspot_is_active(iface: str = '') -> bool:
+def _list_hotspot_connection_names() -> List[str]:
+    result = _run(['nmcli', '-t', '-f', 'NAME', 'con', 'show'])
+    if result.returncode != 0:
+        return []
+    return [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith(HOTSPOT_CONN_PREFIX)
+    ]
+
+
+def _iface_from_hotspot_connection_name(name: str) -> str:
+    if name.startswith(HOTSPOT_CONN_PREFIX):
+        return name[len(HOTSPOT_CONN_PREFIX):]
+    return ''
+
+
+def _find_hotspot_iface() -> str:
     try:
         active = HOTSPOT_STATE_FILE.read_text(encoding='utf-8').strip()
-    except FileNotFoundError:
-        active = ''
+        if active:
+            return active
+    except OSError:
+        pass
+
+    result = _run(['nmcli', '-t', '-f', 'NAME,DEVICE', 'con', 'show', '--active'])
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if ':' not in line:
+                continue
+            name, _, device = line.partition(':')
+            if not name.strip().startswith(HOTSPOT_CONN_PREFIX):
+                continue
+            dev = device.strip()
+            if dev:
+                return dev
+            return _iface_from_hotspot_connection_name(name.strip())
+
+    for name in _list_hotspot_connection_names():
+        iface = _iface_from_hotspot_connection_name(name)
+        if iface:
+            return iface
+
+    if HOTSPOT_DNSMASQ_CONF.exists():
+        try:
+            for line in HOTSPOT_DNSMASQ_CONF.read_text(encoding='utf-8').splitlines():
+                if line.startswith('interface='):
+                    return line.split('=', 1)[1].strip()
+        except OSError:
+            pass
+    return ''
+
+
+def _device_wifi_mode(iface: str) -> str:
+    result = _run(['nmcli', '-t', '-f', '802-11-WIRELESS.MODE', 'dev', 'show', iface])
+    if result.returncode != 0:
+        return ''
+    for line in result.stdout.splitlines():
+        if ':' in line:
+            return line.split(':', 1)[1].strip()
+    return ''
+
+
+def hotspot_is_active(iface: str = '') -> bool:
+    active_iface = _find_hotspot_iface()
+    if active_iface:
+        return active_iface == iface if iface else True
     if iface:
-        return active == iface
-    return bool(active)
+        return _device_wifi_mode(iface) == 'ap'
+    for row in collect_interfaces():
+        if row.get('kind') == 'wifi' and _device_wifi_mode(row['interface']) == 'ap':
+            return True
+    return False
+
+
+def _prepare_wifi_client_iface(iface: str, use_sudo: bool = True) -> None:
+    _sudo(['nmcli', 'radio', 'wifi', 'on'], use_sudo=use_sudo, timeout=15)
+    _sudo(['nmcli', 'device', 'set', iface, 'managed', 'yes'], use_sudo=use_sudo, timeout=15)
+
+
+def _save_wifi_restore(
+    iface: str,
+    ssid: str,
+    password: str,
+    key_mgmt: str,
+    profile_name: str,
+    use_sudo: bool = True,
+) -> None:
+    snapshot = {
+        'interface': iface,
+        'ssid': ssid,
+        'password': password,
+        'key_mgmt': key_mgmt or 'wpa-psk',
+        'profile_name': profile_name,
+    }
+    _write_file_sudo(WIFI_RESTORE_FILE, json.dumps(snapshot, indent=2) + '\n', use_sudo=use_sudo)
+    _sudo(['chmod', '600', str(WIFI_RESTORE_FILE)], use_sudo=use_sudo, timeout=15)
+
+
+def _snapshot_wifi_client(iface: str, use_sudo: bool = True) -> None:
+    """Persist the current Wi-Fi client profile before hotspot replaces it."""
+    for name in _connections_on_interface(iface):
+        if name.startswith(HOTSPOT_CONN_PREFIX):
+            continue
+        fields = _connection_fields(name, secrets=True, use_sudo=use_sudo)
+        if fields.get('connection.type') != '802-11-wireless':
+            continue
+        if fields.get('802-11-wireless.mode') == 'ap':
+            continue
+        ssid = fields.get('802-11-wireless.ssid', '').strip()
+        if not ssid:
+            continue
+        _save_wifi_restore(
+            iface,
+            ssid,
+            fields.get('802-11-wireless-security.psk', ''),
+            fields.get('802-11-wireless-security.key-mgmt', 'wpa-psk'),
+            name,
+            use_sudo=use_sudo,
+        )
+        return
+
+
+def _cleanup_hotspot_connections(use_sudo: bool = True) -> None:
+    for name in _list_hotspot_connection_names():
+        _sudo(['nmcli', 'connection', 'down', name], use_sudo=use_sudo, timeout=20)
+        _sudo(['nmcli', 'connection', 'delete', name], use_sudo=use_sudo, timeout=20)
+
+
+def _restore_wifi_client_fallback(iface: str, use_sudo: bool = True) -> Dict[str, Any]:
+    _prepare_wifi_client_iface(iface, use_sudo)
+    return {
+        'ok': True,
+        'message': 'Wi-Fi ready for scan/connect (no saved network)',
+    }
+
+
+def _restore_wifi_client(iface: str, use_sudo: bool = True) -> Dict[str, Any]:
+    _prepare_wifi_client_iface(iface, use_sudo)
+    raw = _read_file_sudo(WIFI_RESTORE_FILE, use_sudo=use_sudo)
+    if not raw.strip():
+        return _restore_wifi_client_fallback(iface, use_sudo)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return _restore_wifi_client_fallback(iface, use_sudo)
+
+    ssid = str(data.get('ssid', '')).strip()
+    if not ssid:
+        return _restore_wifi_client_fallback(iface, use_sudo)
+
+    _delete_connections_on_interface(iface, use_sudo)
+
+    profile = str(data.get('profile_name') or f'{iface}-wifi').strip()
+    password = str(data.get('password', ''))
+    key_mgmt = str(data.get('key_mgmt', 'wpa-psk')).strip() or 'wpa-psk'
+    cmd = [
+        'nmcli', 'connection', 'add',
+        'type', 'wifi',
+        'ifname', iface,
+        'con-name', profile,
+        'ssid', ssid,
+        'ipv4.method', 'auto',
+        'ipv6.method', 'ignore',
+        'connection.autoconnect', 'yes',
+    ]
+    if key_mgmt != 'none':
+        cmd.extend(['wifi-sec.key-mgmt', key_mgmt])
+        if password:
+            cmd.extend(['wifi-sec.psk', password])
+    add = _sudo(cmd, use_sudo=use_sudo, timeout=30)
+    if add.returncode != 0:
+        return {'ok': False, 'error': add.stderr.strip() or add.stdout.strip()}
+    up = _sudo(['nmcli', 'connection', 'up', profile], use_sudo=use_sudo, timeout=45)
+    ok = up.returncode == 0
+    return {
+        'ok': ok,
+        'error': '' if ok else (up.stderr.strip() or up.stdout.strip()),
+        'message': f'Reconnected to {ssid!r}' if ok else '',
+    }
+
+
+def get_hotspot_iface() -> str:
+    return _find_hotspot_iface()
 
 
 def _write_hotspot_dnsmasq(iface: str, use_sudo: bool = True) -> None:
@@ -140,6 +350,7 @@ def enable_personal_hotspot(iface: str = 'wlan0', use_sudo: bool = True) -> Dict
         return {'ok': False, 'error': f'{iface} is not a Wi-Fi interface'}
 
     _stop_hotspot_dnsmasq(use_sudo)
+    _snapshot_wifi_client(iface, use_sudo)
     _delete_connections_on_interface(iface, use_sudo)
 
     conn = _hotspot_connection_name(iface)
@@ -165,7 +376,7 @@ def enable_personal_hotspot(iface: str = 'wlan0', use_sudo: bool = True) -> Dict
             'ipv4.method', 'manual',
             'ipv4.never-default', 'yes',
             'ipv6.method', 'ignore',
-            'connection.autoconnect', 'yes',
+            'connection.autoconnect', 'no',
         ],
         use_sudo=use_sudo,
         timeout=30,
@@ -207,17 +418,24 @@ def enable_personal_hotspot(iface: str = 'wlan0', use_sudo: bool = True) -> Dict
 
 
 def disable_personal_hotspot(use_sudo: bool = True) -> Dict[str, Any]:
-    iface = ''
-    try:
-        iface = HOTSPOT_STATE_FILE.read_text(encoding='utf-8').strip()
-    except FileNotFoundError:
-        pass
+    iface = _find_hotspot_iface()
     _stop_hotspot_dnsmasq(use_sudo)
+    _cleanup_hotspot_connections(use_sudo)
+
+    restore_msg = ''
+    restore_ok = True
     if iface:
-        conn = _hotspot_connection_name(iface)
-        _sudo(['nmcli', 'connection', 'down', conn], use_sudo=use_sudo, timeout=20)
-        _sudo(['nmcli', 'connection', 'delete', conn], use_sudo=use_sudo, timeout=20)
-    return {'ok': True, 'error': '', 'message': 'Hotspot disabled'}
+        info = get_interface(iface)
+        if info and info.get('kind') == 'wifi':
+            restore = _restore_wifi_client(iface, use_sudo)
+            restore_ok = bool(restore.get('ok'))
+            restore_msg = str(restore.get('message') or restore.get('error') or '')
+
+    msg = 'Hotspot disabled'
+    if restore_msg:
+        prefix = '' if restore_ok else 'reconnect failed: '
+        msg += f'; {prefix}{restore_msg}' if prefix else f'; {restore_msg}'
+    return {'ok': True, 'error': '', 'message': msg, 'iface': iface, 'restore_ok': restore_ok}
 
 
 def set_interface_admin_state(iface: str, up: bool, use_sudo: bool = True) -> Dict[str, Any]:
@@ -337,18 +555,46 @@ def wifi_scan(iface: str = 'wlan0') -> Dict[str, Any]:
 def wifi_connect(ssid: str, password: str, interface: str = 'wlan0', use_sudo: bool = True) -> Dict[str, Any]:
     if not nmcli_available():
         return {'ok': False, 'error': 'nmcli is not available'}
+    interface = interface.strip()
     if hotspot_is_active(interface):
         return {'ok': False, 'error': 'Disable hotspot before connecting as Wi-Fi client'}
     ssid = ssid.strip()
     if not ssid:
         return {'ok': False, 'error': 'SSID is required'}
+
+    _cleanup_hotspot_connections(use_sudo)
+    _prepare_wifi_client_iface(interface, use_sudo)
+
     cmd = ['nmcli', 'dev', 'wifi', 'connect', ssid, 'ifname', interface]
     if password.strip():
         cmd.extend(['password', password.strip()])
     proc = _sudo(cmd, use_sudo=use_sudo, timeout=60)
+    ok = proc.returncode == 0
+    if ok:
+        key_mgmt = 'wpa-psk' if password.strip() else 'none'
+        profile_name = ''
+        for name in _connections_on_interface(interface):
+            fields = _connection_fields(name, use_sudo=use_sudo)
+            if fields.get('802-11-wireless.ssid', '').strip() == ssid:
+                profile_name = name
+                _sudo(
+                    ['nmcli', 'connection', 'modify', name, 'connection.autoconnect', 'yes'],
+                    use_sudo=use_sudo,
+                    timeout=20,
+                )
+                break
+        _save_wifi_restore(
+            interface,
+            ssid,
+            password.strip(),
+            key_mgmt,
+            profile_name or f'{interface}-wifi',
+            use_sudo=use_sudo,
+        )
     return {
-        'ok': proc.returncode == 0,
-        'error': '' if proc.returncode == 0 else (proc.stderr.strip() or proc.stdout.strip()),
+        'ok': ok,
+        'error': '' if ok else (proc.stderr.strip() or proc.stdout.strip()),
+        'message': f'Connected to {ssid!r}' if ok else '',
     }
 
 

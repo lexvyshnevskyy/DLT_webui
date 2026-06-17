@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from webui.collectors.serial_ports import list_serial_devices
+from webui.collectors.serial_ports import list_serial_port_options
 
 
 def read_env_file(path: str) -> Dict[str, str]:
@@ -87,13 +87,18 @@ def write_env_file(path: str, updates: Dict[str, str]) -> Tuple[bool, str]:
     return False, proc.stderr.strip() or proc.stdout.strip() or f'exit {proc.returncode}'
 
 
-def serial_port_choices(current: str = '') -> List[str]:
-    ports = list_serial_devices()
-    if current and current not in ports:
-        ports.insert(0, current)
-    if not ports:
-        ports = ['/dev/ttyUSB0', '/dev/ttyACM0', '/dev/ttyAMA0', '/dev/ttyS0']
-    return ports
+def serial_port_choices(current: str = '') -> List[Dict[str, str]]:
+    options = list_serial_port_options()
+    devices = {row['device'] for row in options}
+    if current and current not in devices:
+        options.insert(0, {
+            'device': current,
+            'label': f'{current} (configured, not detected)',
+        })
+    if not options:
+        for port in ('/dev/ttyUSB0', '/dev/ttyACM0', '/dev/ttyAMA0', '/dev/ttyS0'):
+            options.append({'device': port, 'label': port})
+    return options
 
 
 def restart_service(service: str) -> Tuple[bool, str]:

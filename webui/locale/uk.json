@@ -198,6 +198,12 @@
   "config.vpn_disconnect": "Відключити",
   "config.vpn_boot_service": "Сервіс при завантаженні",
   "config.vpn_pkg_missing": "не встановлено",
+  "config.serial_ports": "Послідовні порти (UART)",
+  "config.serial_ports_hint": "Усі виявлені USB/serial-пристрої на хості. Призначте кожному приладу окремий порт.",
+  "config.serial_port": "Порт",
+  "config.serial_assigned": "Призначено",
+  "config.serial_unassigned": "—",
+  "config.port_select": "Оберіть порт",
 
   "e720.mode.0": "Стаціонарний (утримання частоти)",
   "e720.mode.1": "Циклічний (обертання частот)",

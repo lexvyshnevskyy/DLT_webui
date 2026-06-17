@@ -155,6 +155,23 @@
   </section>
 </details>
 
+<details class="config-section" id="measure-source" open>
+  <summary>Impedance meter source</summary>
+  <section class="card">
+    <p>Active source: <strong>{{ measure.source }}</strong> → topic <code>{{ measure.topic_e720 if measure.source == 'e720' else measure.topic_im3536 }}</code></p>
+    <form method="post" action="/configuration/measure-source" class="form-row">
+      <label>Source
+        <select name="source">
+          <option value="e720" {% if measure.source == 'e720' %}selected{% endif %}>E7-20 (measure_device)</option>
+          <option value="im3536" {% if measure.source == 'im3536' %}selected{% endif %}>Hioki IM3536</option>
+        </select>
+      </label>
+      <label><input type="checkbox" name="restart" value="true" checked> Restart services</label>
+      <button type="submit">Save source</button>
+    </form>
+  </section>
+</details>
+
 <details class="config-section" id="e720">
   <summary>E7-20 / measure_device</summary>
   <section class="card">
@@ -164,6 +181,38 @@
       <label>Port <input name="port" list="meas-ports" value="{{ meas.port }}"></label>
       <datalist id="meas-ports">{% for p in meas_port_choices %}<option value="{{ p }}">{% endfor %}</datalist>
       <label>Baud <input type="number" name="speed" value="{{ meas.speed }}"></label>
+      <label><input type="checkbox" name="restart" value="true"> Restart service</label>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+</details>
+
+</details>
+
+<details class="config-section" id="im3536">
+  <summary>IM3536 (Hioki LCR)</summary>
+  <section class="card">
+    <form method="post" action="/configuration/peek/e720"><button type="submit">Read measure topic (E720)</button></form>
+    {% if peek.e720 %}<pre class="mono">{{ peek.e720 }}</pre>{% endif %}
+    <form method="post" action="/configuration/im3536" class="form-row">
+      <label>Interface
+        <select name="interface">
+          <option value="rs232" {% if im3536.interface == 'rs232' %}selected{% endif %}>RS-232C</option>
+          <option value="usb" {% if im3536.interface == 'usb' %}selected{% endif %}>USB</option>
+          <option value="lan" {% if im3536.interface == 'lan' %}selected{% endif %}>LAN</option>
+        </select>
+      </label>
+      <label>Port <input name="port" list="im3536-ports" value="{{ im3536.port }}"></label>
+      <datalist id="im3536-ports">{% for p in im3536_port_choices %}<option value="{{ p }}">{% endfor %}</datalist>
+      <label>Baud <input type="number" name="baudrate" value="{{ im3536.baudrate }}"></label>
+      <label>LAN host <input name="host" value="{{ im3536.host }}"></label>
+      <label>LAN port <input type="number" name="lan_port" value="{{ im3536.lan_port }}"></label>
+      <label>Terminator
+        <select name="terminator">
+          <option value="crlf" {% if im3536.terminator == 'crlf' %}selected{% endif %}>CR+LF</option>
+          <option value="cr" {% if im3536.terminator == 'cr' %}selected{% endif %}>CR</option>
+        </select>
+      </label>
       <label><input type="checkbox" name="restart" value="true"> Restart service</label>
       <button type="submit">Save</button>
     </form>

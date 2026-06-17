@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 ENV_KEYS = {
     'LTM2985': 'DELATOMETRY_LTM2985_PORT',
     'E7-20 / measure_device': 'DELATOMETRY_MEASURE_PORT',
+    'IM3536': 'DELATOMETRY_IM3536_PORT',
     'HMI (Nextion)': 'DELATOMETRY_HMI_PORT',
 }
 

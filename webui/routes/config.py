@@ -189,7 +189,34 @@ async def save_measure(
 ) -> RedirectResponse:
     _, node = _tpl(request)
     node.ui_save_measure_device_config(port, speed, restart)
-    return RedirectResponse(url='/configuration', status_code=303)
+    return RedirectResponse(url='/configuration#e720', status_code=303)
+
+
+@router.post('/configuration/measure-source')
+async def save_measure_source(
+    request: Request,
+    source: str = Form('e720'),
+    restart: bool = Form(False),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    node.ui_save_measure_source(source, restart)
+    return RedirectResponse(url='/configuration#measure-source', status_code=303)
+
+
+@router.post('/configuration/im3536')
+async def save_im3536(
+    request: Request,
+    interface: str = Form('rs232'),
+    port: str = Form('/dev/ttyUSB0'),
+    baudrate: float = Form(9600),
+    host: str = Form('192.168.0.100'),
+    lan_port: float = Form(23),
+    terminator: str = Form('crlf'),
+    restart: bool = Form(False),
+) -> RedirectResponse:
+    _, node = _tpl(request)
+    node.ui_save_im3536_config(interface, port, baudrate, host, lan_port, terminator, restart)
+    return RedirectResponse(url='/configuration#im3536', status_code=303)
 
 
 @router.post('/configuration/database/test')

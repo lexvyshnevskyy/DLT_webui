@@ -27,6 +27,17 @@ from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
 from webui.program_schedule import IDLE_EXPERIMENT_TIMING, ProgramStep, parse_program_steps
 from webui.export_data import export_program_archive, export_run_archive
 from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
+from webui.measure_source import resolve_measure_topics_from_env
+from webui.system_config import (
+    get_configuration_snapshot,
+    read_env_file,
+    restart_service,
+    serial_port_choices,
+    write_env_file,
+)
+from webui.ros_message import message_to_dict
+from webui.dataframe_utils import parse_temperature_steps
+from webui.collectors import network_config
 
 
 @dataclass
@@ -39,16 +50,7 @@ class _PendingServiceCall:
     done: threading.Event
     result: Optional[Dict[str, Any]] = None
     error: Optional[BaseException] = None
-from webui.system_config import (
-    get_configuration_snapshot,
-    read_env_file,
-    restart_service,
-    serial_port_choices,
-    write_env_file,
-)
-from webui.ros_message import message_to_dict
-from webui.dataframe_utils import parse_temperature_steps
-from webui.collectors import network_config
+
 
 CoreQuery = DatabaseQuery
 
@@ -56,6 +58,7 @@ DEFAULT_SYSTEMD_UNITS = [
     'delatometry-database.service',
     'delatometry-ltm2985.service',
     'delatometry-measure-device.service',
+    'delatometry-im3536.service',
     'delatometry-ads1256.service',
     'delatometry-core.service',
     'delatometry-hmi.service',
@@ -73,6 +76,7 @@ class WebHMINode(Node):
         self.declare_parameter('measurement_topic', '/ltm2985/measurement')
         self.declare_parameter('measure_topic', '/measure_device')
         self.declare_parameter('measure_command_topic', '/measure_device/command')
+        self.declare_parameter('measure_source', 'e720')
         self.declare_parameter('bind_host', '0.0.0.0')
         self.declare_parameter('bind_port', 80)
         self.declare_parameter('title', 'Delatometry Control')
@@ -102,8 +106,11 @@ class WebHMINode(Node):
         self.experiment_status_topic = str(self.get_parameter('experiment_status_topic').value)
         self.database_service = str(self.get_parameter('database_service').value)
         self.measurement_topic = str(self.get_parameter('measurement_topic').value)
-        self.measure_topic = str(self.get_parameter('measure_topic').value)
-        self.measure_command_topic = str(self.get_parameter('measure_command_topic').value)
+        self.delatometry_env_file = str(self.get_parameter('delatometry_env_file').value)
+        measure_topics = resolve_measure_topics_from_env(read_env_file(self.delatometry_env_file))
+        self.measure_source = measure_topics['source']
+        self.measure_topic = measure_topics['measure_topic']
+        self.measure_command_topic = measure_topics['measure_command_topic']
         self.bind_host = str(self.get_parameter('bind_host').value)
         self.bind_port = int(self.get_parameter('bind_port').value)
         self.title = str(self.get_parameter('title').value)
@@ -113,7 +120,6 @@ class WebHMINode(Node):
         self.auth_password = str(self.get_parameter('auth_password').value)
         self.status_refresh_period_sec = float(self.get_parameter('status_refresh_period_sec').value)
         self.control_loop_period_sec = float(self.get_parameter('control_loop_period_sec').value)
-        self.delatometry_env_file = str(self.get_parameter('delatometry_env_file').value)
         self.enable_service_control = bool(self.get_parameter('enable_service_control').value)
         self.network_use_sudo = bool(self.get_parameter('network_use_sudo').value)
         self.ros_service_timeout_sec = max(2.0, float(self.get_parameter('ros_service_timeout_sec').value))
@@ -550,6 +556,8 @@ class WebHMINode(Node):
         self._ensure_e720_sweep_for_running_program()
 
     def _publish_e720_byte(self, byte_val: int) -> None:
+        if self.measure_source != 'e720':
+            return
         msg = UInt8()
         msg.data = int(byte_val) & 0xFF
         self._e720_cmd_pub.publish(msg)
@@ -713,7 +721,7 @@ class WebHMINode(Node):
             elif was_running and not running:
                 self._clear_e720_sweep_runtime()
 
-            if running:
+            if running and self.measure_source == 'e720':
                 self._ensure_e720_sweep_for_running_program()
                 sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
                 cmd = sweep_result.get('command_byte')
@@ -1213,6 +1221,57 @@ class WebHMINode(Node):
             bool(restart),
         )
         return msg, msg
+
+    def ui_save_im3536_config(
+        self,
+        interface: str,
+        port: str,
+        baudrate: float,
+        host: str,
+        lan_port: float,
+        terminator: str,
+        restart: bool,
+    ) -> Tuple[str, str]:
+        msg = self._save_env_section(
+            {
+                'DELATOMETRY_IM3536_INTERFACE': str(interface).strip().lower(),
+                'DELATOMETRY_IM3536_PORT': str(port).strip(),
+                'DELATOMETRY_IM3536_BAUDRATE': str(int(baudrate)),
+                'DELATOMETRY_IM3536_HOST': str(host).strip(),
+                'DELATOMETRY_IM3536_LAN_PORT': str(int(lan_port)),
+                'DELATOMETRY_IM3536_TERMINATOR': str(terminator).strip().lower(),
+            },
+            'delatometry-im3536.service',
+            bool(restart),
+        )
+        return msg, msg
+
+    def ui_save_measure_source(self, source: str, restart: bool) -> str:
+        from webui.measure_source import normalize_measure_source
+
+        normalized = normalize_measure_source(source)
+        ok, msg = write_env_file(
+            self.delatometry_env_file,
+            {'DELATOMETRY_MEASURE_SOURCE': normalized},
+        )
+        if not ok:
+            return f'Failed to save measure source: {msg}'
+
+        topics = resolve_measure_topics_from_env(read_env_file(self.delatometry_env_file))
+        self.measure_source = topics['source']
+        self.measure_topic = topics['measure_topic']
+        self.measure_command_topic = topics['measure_command_topic']
+
+        if not restart:
+            return f'Saved measure source={normalized}. Restart core, webui, and meter services to apply.'
+
+        active = 'delatometry-im3536.service' if normalized == 'im3536' else 'delatometry-measure-device.service'
+        inactive = 'delatometry-measure-device.service' if normalized == 'im3536' else 'delatometry-im3536.service'
+        systemd_ops.control_unit(inactive, 'stop', use_sudo=True)
+        systemd_ops.control_unit(active, 'start', use_sudo=True)
+        for svc in ('delatometry-core.service', 'delatometry-webui.service'):
+            restart_service(svc)
+        return f'Switched measure source to {normalized} ({topics["measure_topic"]}).'
 
     def ui_save_database_config(
         self,
@@ -1731,11 +1790,14 @@ class WebHMINode(Node):
             'iface_choices': ifaces,
             'ltm': snap['ltm2985'],
             'meas': snap['measure_device'],
+            'im3536': snap['im3536'],
+            'measure': snap['measure'],
             'db': snap['database'],
             'core': core,
             'ads': snap['ads1256'],
             'ltm_port_choices': serial_port_choices(snap['ltm2985']['port']),
             'meas_port_choices': serial_port_choices(snap['measure_device']['port']),
+            'im3536_port_choices': serial_port_choices(snap['im3536']['port']),
             'pwm_pins': gpio_pins.bcm_pin_choices(core['pwm_pin_ch1']),
             'hotspot_ssid': network_config.HOTSPOT_SSID,
             'wifi_networks': wifi_rows,

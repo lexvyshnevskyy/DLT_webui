@@ -123,6 +123,20 @@ def get_configuration_snapshot(env_file: str) -> Dict[str, Any]:
             'port': env.get('DELATOMETRY_MEASURE_PORT', '/dev/ttyUSB0'),
             'speed': env.get('DELATOMETRY_MEASURE_SPEED', '9600'),
         },
+        'measure_source': env.get('DELATOMETRY_MEASURE_SOURCE', 'e720'),
+        'measure': {
+            'source': env.get('DELATOMETRY_MEASURE_SOURCE', 'e720'),
+            'topic_e720': env.get('DELATOMETRY_MEASURE_TOPIC_E720', '/measure_device'),
+            'topic_im3536': env.get('DELATOMETRY_MEASURE_TOPIC_IM3536', '/im3536'),
+        },
+        'im3536': {
+            'interface': env.get('DELATOMETRY_IM3536_INTERFACE', 'rs232'),
+            'port': env.get('DELATOMETRY_IM3536_PORT', '/dev/ttyUSB0'),
+            'baudrate': env.get('DELATOMETRY_IM3536_BAUDRATE', '9600'),
+            'host': env.get('DELATOMETRY_IM3536_HOST', '192.168.0.100'),
+            'lan_port': env.get('DELATOMETRY_IM3536_LAN_PORT', '23'),
+            'terminator': env.get('DELATOMETRY_IM3536_TERMINATOR', 'crlf'),
+        },
         'database': {
             'host': env.get('DELATOMETRY_DB_HOST', '127.0.0.1'),
             'port': env.get('DELATOMETRY_DB_PORT', '3306'),

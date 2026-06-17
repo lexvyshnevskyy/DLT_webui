@@ -16,6 +16,7 @@ DEFAULT_UNITS = [
     'delatometry-database.service',
     'delatometry-ltm2985.service',
     'delatometry-measure-device.service',
+    'delatometry-im3536.service',
     'delatometry-ads1256.service',
     'delatometry-core.service',
     'delatometry-hmi.service',

@@ -5,6 +5,7 @@ webui:
     measurement_topic: /ltm2985/measurement
     measure_topic: /measure_device
     measure_command_topic: /measure_device/command
+    measure_source: e720
     bind_host: 0.0.0.0
     bind_port: 80
     title: Delatometry Control
@@ -32,6 +33,7 @@ webui:
       - delatometry-database.service
       - delatometry-ltm2985.service
       - delatometry-measure-device.service
+      - delatometry-im3536.service
       - delatometry-ads1256.service
       - delatometry-core.service
       - delatometry-hmi.service

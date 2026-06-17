@@ -24,7 +24,7 @@ def e720_from_msg(msg: Any) -> Dict[str, Any]:
     if hasattr(msg, 'header') and hasattr(msg.header, 'frame_id'):
         frame_id = str(msg.header.frame_id)
 
-    online = frame_id != 'e720_offline'
+    online = not str(frame_id).endswith('_offline')
     return {
         'online': online,
         'frame_id': frame_id,
@@ -41,10 +41,15 @@ def e720_from_msg(msg: Any) -> Dict[str, Any]:
 
 def e720_summary_text(data: Dict[str, Any]) -> str:
     if not data.get('online', False) and data.get('frame_id') == '':
-        return 'E7-20: waiting for data...'
+        return 'Measure device: waiting for data...'
+    frame_id = str(data.get('frame_id', '') or '')
+    if frame_id.startswith('im3536'):
+        device_label = 'IM3536'
+    else:
+        device_label = 'E7-20'
     status = 'ONLINE' if data.get('online') else 'OFFLINE'
     lines = [
-        f'Status: {status} ({data.get("frame_id", "")})',
+        f'{device_label} — Status: {status} ({frame_id})',
         f'Primary:   {data.get("imparam", "")} = {data.get("firstvalue", 0):.6g}',
         f'Secondary: {data.get("secparam", "")} = {data.get("secondvalue", 0):.6g}',
         f'Frequency: {format_frequency(float(data.get("frequency", 0) or 0))}',

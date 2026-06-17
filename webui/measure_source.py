@@ -25,6 +25,7 @@ def resolve_measure_topics_from_env(env: Dict[str, str]) -> Dict[str, str]:
     e720_topic = env.get('DELATOMETRY_MEASURE_TOPIC_E720', '/measure_device')
     im3536_topic = env.get('DELATOMETRY_MEASURE_TOPIC_IM3536', '/im3536')
     command_topic = env.get('DELATOMETRY_MEASURE_COMMAND_TOPIC', '/measure_device/command')
+    frequency_topic = env.get('DELATOMETRY_IM3536_FREQUENCY_TOPIC', '/im3536/frequency')
     measure_topic = resolve_measure_topic(
         source,
         e720_topic=e720_topic,
@@ -32,8 +33,11 @@ def resolve_measure_topics_from_env(env: Dict[str, str]) -> Dict[str, str]:
     )
     if not command_topic.startswith('/'):
         command_topic = f'/{command_topic}'
+    if not frequency_topic.startswith('/'):
+        frequency_topic = f'/{frequency_topic}'
     return {
         'source': source,
         'measure_topic': measure_topic,
         'measure_command_topic': command_topic,
+        'measure_frequency_topic': frequency_topic,
     }

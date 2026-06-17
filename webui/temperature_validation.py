@@ -261,11 +261,17 @@ def validate_temperature_steps(
     return (len(issues) == 0, issues)
 
 
-def validate_e720(
+def validate_measure_sweep(
     sweep_mode: int,
     enabled_freqs: Sequence[str],
     range_max: float,
+    *,
+    measure_source: str = 'e720',
 ) -> Tuple[bool, List[ValidationIssue]]:
+    from webui.measure_source import normalize_measure_source
+
+    device = normalize_measure_source(measure_source)
+    device_label = 'IM3536' if device == 'im3536' else 'E7-20'
     issues: List[ValidationIssue] = []
     freqs: List[int] = []
     for raw in enabled_freqs or []:
@@ -278,7 +284,7 @@ def validate_e720(
             ValidationIssue(
                 field='enabled_freqs',
                 code='e720_no_frequencies',
-                message='Select at least one E7-20 frequency.',
+                message=f'Select at least one {device_label} frequency.',
             )
         )
 
@@ -306,6 +312,14 @@ def validate_e720(
     return (len(issues) == 0, issues)
 
 
+def validate_e720(
+    sweep_mode: int,
+    enabled_freqs: Sequence[str],
+    range_max: float,
+) -> Tuple[bool, List[ValidationIssue]]:
+    return validate_measure_sweep(sweep_mode, enabled_freqs, range_max, measure_source='e720')
+
+
 def validate_new_program(
     description: str,
     steps: Sequence[Sequence[Any]],
@@ -313,16 +327,22 @@ def validate_new_program(
     enabled_freqs: Sequence[str],
     range_max: float,
     experiment_mode: str = 'default',
+    measure_source: str = 'e720',
 ) -> ProgramValidationResult:
     result = ProgramValidationResult()
     desc_ok, desc_issues = validate_description(description)
     steps_ok, step_issues = validate_temperature_steps(steps, experiment_mode=experiment_mode)
-    e720_ok, e720_issues = validate_e720(sweep_mode, enabled_freqs, range_max)
+    sweep_ok, sweep_issues = validate_measure_sweep(
+        sweep_mode,
+        enabled_freqs,
+        range_max,
+        measure_source=measure_source,
+    )
 
     result.description_ok = desc_ok
     result.steps_ok = steps_ok
-    result.e720_ok = e720_ok
-    result.issues = desc_issues + step_issues + e720_issues
+    result.e720_ok = sweep_ok
+    result.issues = desc_issues + step_issues + sweep_issues
     result.ok = result.can_create
     return result
 
@@ -362,6 +382,7 @@ def validate_new_program_form(form: Mapping[str, Any]) -> ProgramValidationResul
         enabled,
         range_max,
         experiment_mode=experiment_mode,
+        measure_source=str(form.get('measure_source', 'e720') or 'e720'),
     )
 
 

@@ -16,7 +16,7 @@ from msgs.msg import Ads, E720, Measurement
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import String, UInt8
+from std_msgs.msg import Float64, String, UInt8
 
 from webui.collectors import db_test, gpio_pins, host_stats, network_config, network_info, serial_ports, systemd_ops, vpn_config
 from webui.param_utils import ros_param_bool
@@ -28,7 +28,13 @@ from webui.temperature_validation import (
     validate_new_program,
     validate_temperature_steps,
 )
-from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES, SWEEP_MODE_LABELS
+from webui.measure_sweep import (
+    MeasureSweepConfig,
+    MeasureSweepController,
+    SWEEP_MODE_LABELS,
+    standard_frequencies_for_device,
+)
+from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES
 from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
 from webui.program_schedule import IDLE_EXPERIMENT_TIMING, ProgramStep, parse_program_steps
 from webui.export_data import export_program_archive, export_run_archive
@@ -117,6 +123,7 @@ class WebHMINode(Node):
         self.measure_source = measure_topics['source']
         self.measure_topic = measure_topics['measure_topic']
         self.measure_command_topic = measure_topics['measure_command_topic']
+        self.measure_frequency_topic = measure_topics['measure_frequency_topic']
         self.bind_host = str(self.get_parameter('bind_host').value)
         self.bind_port = int(self.get_parameter('bind_port').value)
         self.title = str(self.get_parameter('title').value)
@@ -177,6 +184,7 @@ class WebHMINode(Node):
             callback_group=self._service_cb_group,
         )
         self._e720_cmd_pub = self.create_publisher(UInt8, self.measure_command_topic, 10)
+        self._im3536_freq_pub = self.create_publisher(Float64, self.measure_frequency_topic, 10)
         stream_len = max(10, self.stream_max_lines)
         self.create_subscription(Measurement, self.measurement_topic, self._on_measurement, 100)
         self.create_subscription(E720, self.measure_topic, self._on_e720, 10)
@@ -184,8 +192,9 @@ class WebHMINode(Node):
         self.create_subscription(Ads, self.ads_topic, self._on_ads, 10)
         self.create_subscription(String, self.experiment_status_topic, self._on_core_experiment_status, 10)
 
-        self._sweep = E720SweepController()
+        self._sweep = MeasureSweepController()
         self._sweep_loaded_program_id: Optional[int] = None
+        self._last_applied_frequency_hz: Optional[float] = None
         self._core_program_status: Dict[str, Any] = {}
         self._program_was_running: bool = False
         self._last_active_run: Optional[Tuple[int, int]] = None
@@ -519,37 +528,56 @@ class WebHMINode(Node):
             raise RuntimeError(response.get('error', 'Failed to load program steps'))
         return parse_program_steps(response.get('row', []))
 
-    def _load_e720_config_for_program(self, program_id: int) -> None:
+    def _load_measure_sweep_config_for_program(self, program_id: int) -> None:
         if program_id <= 0 or not self._db_available():
             return
         try:
             response = self._db_query({'cmd': 'get_e720', 'id': program_id})
             if response.get('result') == 'Ok' and response.get('row'):
-                self._sweep.load_config(E720SweepConfig.from_db_row(response['row']))
+                self._sweep.load_config(
+                    MeasureSweepConfig.from_db_row(
+                        response['row'],
+                        fallback_device=self.measure_source,
+                    )
+                )
         except Exception as exc:
-            self._log(f'Could not load E7-20 config for program {program_id}: {exc}')
+            self._log(f'Could not load measure sweep for program {program_id}: {exc}')
 
-    def _clear_e720_sweep_runtime(self) -> None:
+    def _load_e720_config_for_program(self, program_id: int) -> None:
+        self._load_measure_sweep_config_for_program(program_id)
+
+    def _clear_measure_sweep_runtime(self) -> None:
         self._sweep.reset()
+        self._last_applied_frequency_hz = None
         with self._lock:
             self._sweep_loaded_program_id = None
 
-    def _ensure_e720_sweep_for_running_program(self) -> None:
-        """Load E7-20 sweep from DB when core runs a program (start, restart, or HMI)."""
+    def _clear_e720_sweep_runtime(self) -> None:
+        self._clear_measure_sweep_runtime()
+
+    def _ensure_measure_sweep_for_running_program(self) -> None:
+        """Load frequency sweep from DB when core runs a program."""
         with self._lock:
             raw_pid = self._core_program_status.get('program_id')
             loaded_pid = self._sweep_loaded_program_id
         if raw_pid is None:
             if loaded_pid is not None:
-                self._clear_e720_sweep_runtime()
+                self._clear_measure_sweep_runtime()
             return
         program_id = int(raw_pid)
         if program_id <= 0 or loaded_pid == program_id:
             return
-        self._load_e720_config_for_program(program_id)
+        self._load_measure_sweep_config_for_program(program_id)
         with self._lock:
             self._sweep_loaded_program_id = program_id
-        self._log(f'Loaded E7-20 sweep for active program {program_id}')
+        device = self._sweep.config.normalized_device()
+        self._log(f'Loaded {device} frequency sweep for active program {program_id}')
+        initial_hz = self._sweep.initial_target_frequency()
+        if initial_hz is not None and device == 'im3536':
+            self._publish_im3536_frequency(initial_hz)
+
+    def _ensure_e720_sweep_for_running_program(self) -> None:
+        self._ensure_measure_sweep_for_running_program()
 
     def _bootstrap_active_program_state(self) -> None:
         if self._bootstrap_done:
@@ -561,6 +589,17 @@ class WebHMINode(Node):
             pass
         self._sync_core_program_status()
         self._ensure_e720_sweep_for_running_program()
+
+    def _publish_im3536_frequency(self, frequency_hz: float) -> None:
+        if frequency_hz <= 0.0:
+            return
+        if self._last_applied_frequency_hz is not None and abs(self._last_applied_frequency_hz - frequency_hz) < 1e-6:
+            return
+        msg = Float64()
+        msg.data = float(frequency_hz)
+        self._im3536_freq_pub.publish(msg)
+        self._last_applied_frequency_hz = float(frequency_hz)
+        self._log(f'IM3536 frequency command: {frequency_hz:g} Hz')
 
     def _publish_e720_byte(self, byte_val: int) -> None:
         if self.measure_source != 'e720':
@@ -728,12 +767,23 @@ class WebHMINode(Node):
             elif was_running and not running:
                 self._clear_e720_sweep_runtime()
 
-            if running and self.measure_source == 'e720':
-                self._ensure_e720_sweep_for_running_program()
-                sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
-                cmd = sweep_result.get('command_byte')
-                if cmd is not None:
-                    self._publish_e720_byte(int(cmd))
+            if running:
+                sweep_device = self._sweep.config.normalized_device()
+                active_source = self.measure_source
+                if sweep_device != active_source:
+                    pass
+                elif active_source == 'e720':
+                    self._ensure_measure_sweep_for_running_program()
+                    sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
+                    cmd = sweep_result.get('command_byte')
+                    if cmd is not None:
+                        self._publish_e720_byte(int(cmd))
+                elif active_source == 'im3536':
+                    self._ensure_measure_sweep_for_running_program()
+                    sweep_result = self._sweep.tick(float(e720_data.get('frequency', 0) or 0), running=True)
+                    target_hz = sweep_result.get('target_frequency_hz')
+                    if target_hz is not None:
+                        self._publish_im3536_frequency(float(target_hz))
         except Exception as exc:
             self._log(f'Control loop error: {exc}')
 
@@ -1271,7 +1321,7 @@ class WebHMINode(Node):
         self.measure_source = topics['source']
         self.measure_topic = topics['measure_topic']
         self.measure_command_topic = topics['measure_command_topic']
-
+        self.measure_frequency_topic = topics['measure_frequency_topic']
         if not restart:
             return f'Saved measure source={normalized}. Restart core, webui, and meter services to apply.'
 
@@ -1520,10 +1570,11 @@ class WebHMINode(Node):
         freqs = {int(float(x)) for x in (enabled_freqs or [])}
         if not freqs:
             freqs = {1000}
-        config = E720SweepConfig(
+        config = MeasureSweepConfig.for_device(
+            self.measure_source,
             mode=int(mode),
             enabled_frequencies=freqs,
-            range_min_hz=min(freqs),
+            range_min_hz=float(min(freqs)),
             range_max_hz=float(range_max),
         )
         self._sweep.load_config(config)
@@ -1532,8 +1583,9 @@ class WebHMINode(Node):
             response = self._db_query({'cmd': 'set_e720', **payload})
             if response.get('result') != 'Ok':
                 return f'ERROR: {response.get("error", "save failed")}'
-            self._log(f'Saved E7-20 sweep config for program {program_id_int}')
-            return f'Saved E7-20 config: {SWEEP_MODE_LABELS.get(config.mode, mode)}.'
+            label = 'IM3536' if config.normalized_device() == 'im3536' else 'E7-20'
+            self._log(f'Saved {label} sweep config for program {program_id_int}')
+            return f'Saved {label} config: {SWEEP_MODE_LABELS.get(config.mode, mode)}.'
         except Exception as exc:
             return f'ERROR: {exc}'
 
@@ -2020,6 +2072,7 @@ class WebHMINode(Node):
             enabled_freqs,
             float(range_max),
             experiment_mode=experiment_mode,
+            measure_source=self.measure_source,
         )
         if not check.can_create:
             return check.issues[0].message if check.issues else 'Cannot create program.'
@@ -2177,6 +2230,7 @@ class WebHMINode(Node):
             row = detail['row']
             e720 = row.get('e720') or {}
             cfg_raw = e720.get('config') if isinstance(e720.get('config'), dict) else {}
+            sweep_device = str(cfg_raw.get('device', self.measure_source) or self.measure_source)
             enabled = [str(int(x)) for x in cfg_raw.get('enabled_frequencies', [1000])]
             steps = [
                 [s['step_id'], s['t_start'], s['t_stop'], s['minutes']]
@@ -2191,6 +2245,7 @@ class WebHMINode(Node):
                 'steps': steps,
                 'experiment_mode': normalize_experiment_mode(str(meta.get('experiment_mode', 'default'))),
                 'sweep_mode': int(e720.get('param', 0) or 0),
+                'sweep_device': sweep_device,
                 'enabled_freqs': enabled,
                 'range_max': float(cfg_raw.get('range_max_hz', 10000) or 10000),
                 'run_status': self._experiment_banner(),
@@ -2333,8 +2388,9 @@ class WebHMINode(Node):
                 'key': 'experiment_mode',
                 'value': normalize_experiment_mode(experiment_mode),
             })
-            freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
-            config = E720SweepConfig(
+            freqs = {int(float(x)) for x in (enabled_freqs or [])} or set(standard_frequencies_for_device(self.measure_source)[:1])
+            config = MeasureSweepConfig.for_device(
+                self.measure_source,
                 mode=int(mode),
                 enabled_frequencies=freqs,
                 range_min_hz=float(min(freqs)),
@@ -2480,8 +2536,9 @@ class WebHMINode(Node):
             })
             if mode_resp.get('result') != 'Ok':
                 return f'ERROR: {mode_resp.get("error", "experiment mode save failed")}'
-            freqs = {int(float(x)) for x in (enabled_freqs or [])} or {1000}
-            config = E720SweepConfig(
+            freqs = {int(float(x)) for x in (enabled_freqs or [])} or set(standard_frequencies_for_device(self.measure_source)[:1])
+            config = MeasureSweepConfig.for_device(
+                self.measure_source,
                 mode=int(mode),
                 enabled_frequencies=freqs,
                 range_min_hz=float(min(freqs)),
@@ -2489,7 +2546,7 @@ class WebHMINode(Node):
             )
             response = self._db_query({'cmd': 'set_e720', **config.to_db_payload(program_id)})
             if response.get('result') != 'Ok':
-                err = response.get('error') or 'E7-20 config save failed'
+                err = response.get('error') or 'frequency sweep save failed'
                 return f'ERROR: {err}'
             self._load_e720_config_for_program(program_id)
             return f'Program {program_id} saved.'

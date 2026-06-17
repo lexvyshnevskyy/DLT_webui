@@ -6,8 +6,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
-from webui.e720_sweep import STANDARD_FREQUENCIES
-from webui.i18n import translate_e720_modes, translate_validation_result
+from webui.i18n import translate_e720_modes, translate_sweep_section_title, translate_validation_result
+from webui.measure_sweep import standard_frequencies_for_device
 from webui.program_steps import parse_step_field_updates
 from webui.async_bridge import run_blocking
 from webui.render import template_response
@@ -34,11 +34,16 @@ def _experiment_mode_choices():
     ]
 
 
-def _e720_choices():
+def _sweep_choices(measure_source: str):
     return {
         'modes': translate_e720_modes(),
-        'frequencies': [str(f) for f in STANDARD_FREQUENCIES],
+        'frequencies': [str(f) for f in standard_frequencies_for_device(measure_source)],
+        'section_title': translate_sweep_section_title(measure_source),
     }
+
+
+def _e720_choices():
+    return _sweep_choices('e720')
 
 
 @router.get('/programs', response_class=HTMLResponse)
@@ -72,7 +77,9 @@ async def program_new_form(request: Request, msg: str = Query(''), new: int = Qu
             'experiment_modes': _experiment_mode_choices(),
             'steps': node.get_new_program_draft(),
             'message': msg,
-            'e720': _e720_choices(),
+            'measure_source': node.measure_source,
+            'e720': _sweep_choices(node.measure_source),
+            'sweep_section_title': translate_sweep_section_title(node.measure_source),
             'sweep_mode': meta['sweep_mode'],
             'enabled_freqs': meta['enabled_freqs'],
             'range_max': meta['range_max'],
@@ -96,6 +103,7 @@ async def program_new_validate(request: Request) -> JSONResponse:
         enabled,
         float(form.get('range_max', 10000) or 10000),
         experiment_mode=str(form.get('experiment_mode', 'default') or 'default'),
+        measure_source=node.measure_source,
     )
     return JSONResponse(translate_validation_result(result))
 
@@ -288,6 +296,7 @@ async def program_edit_form(request: Request, id: int = Query(0), msg: str = Que
     node.ui_programs_set_nav(id)
     fields = node.program_edit_fields(id)
     default_step = suggest_next_step(fields.get('steps', []))
+    sweep_device = fields.get('sweep_device', node.measure_source)
     return template_response(
         templates,
         request,
@@ -296,7 +305,9 @@ async def program_edit_form(request: Request, id: int = Query(0), msg: str = Que
             'title': node.title,
             'program_id': id,
             'message': msg,
-            'e720': _e720_choices(),
+            'measure_source': node.measure_source,
+            'e720': _sweep_choices(sweep_device),
+            'sweep_section_title': translate_sweep_section_title(sweep_device),
             'experiment_modes': _experiment_mode_choices(),
             'default_step': default_step,
             't_limits': {'t_min_k': T_MIN_K, 't_max_k': T_MAX_K},

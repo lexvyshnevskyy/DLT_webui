@@ -165,6 +165,13 @@ def translate_validation_result(result: Any) -> Dict[str, Any]:
     return data
 
 
+def translate_sweep_section_title(measure_source: str) -> str:
+    from webui.measure_source import normalize_measure_source
+
+    key = 'program_new.section_im3536' if normalize_measure_source(measure_source) == 'im3536' else 'program_new.section_e720'
+    return _(key)
+
+
 def translate_e720_modes() -> list:
     from webui.e720_sweep import SWEEP_MODE_LABELS
 

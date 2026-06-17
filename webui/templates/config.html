@@ -288,15 +288,16 @@
   </section>
 </details>
 
-<details class="config-section">
+<details class="config-section" id="core">
   <summary>Core (temperature control)</summary>
   <section class="card">
+    <p class="muted">Enable PWM and check <strong>Restart core service</strong> before Save. Pi 4: <code>pigpiod</code>. Pi 5: <code>python3-lgpio</code> and <code>dtoverlay=pwm</code> in <code>/boot/firmware/config.txt</code> (pigpiod does not support Pi 5).</p>
     <form method="post" action="/configuration/core" class="form-row">
       <label>PWM CH1 <select name="pwm_ch1">{% for p in pwm_pins %}<option value="{{ p }}" {% if p == core.pwm_pin_ch1|string %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
       <label>PWM CH2 <select name="pwm_ch2">{% for p in pwm_pins %}<option value="{{ p }}" {% if p == core.pwm_pin_ch2|string %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
       <label><input type="checkbox" name="enable_db_client" value="true" {% if core.enable_database_client %}checked{% endif %}> DB client</label>
       <label><input type="checkbox" name="enable_pwm" value="true" {% if core.enable_pwm_controller %}checked{% endif %}> PWM control</label>
-      <label><input type="checkbox" name="restart" value="true"> Restart</label>
+      <label><input type="checkbox" name="restart" value="true" checked> Restart core service</label>
       <button type="submit">Save core</button>
     </form>
   </section>

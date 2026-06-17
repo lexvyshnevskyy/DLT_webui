@@ -165,6 +165,20 @@ def translate_validation_result(result: Any) -> Dict[str, Any]:
     return data
 
 
+def translate_experiment_measure_title(measure_source: str) -> str:
+    from webui.measure_source import normalize_measure_source
+
+    key = 'experiment.im3536' if normalize_measure_source(measure_source) == 'im3536' else 'experiment.e720'
+    return _(key)
+
+
+def translate_experiment_measure_stream(measure_source: str) -> str:
+    from webui.measure_source import normalize_measure_source
+
+    key = 'experiment.im3536_stream' if normalize_measure_source(measure_source) == 'im3536' else 'experiment.e720_stream'
+    return _(key)
+
+
 def translate_sweep_section_title(measure_source: str) -> str:
     from webui.measure_source import normalize_measure_source
 

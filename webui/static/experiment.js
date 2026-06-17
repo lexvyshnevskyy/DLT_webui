@@ -143,8 +143,24 @@
     pwmEl.textContent = formatPwmStatus(resolvePwmStatus(data));
   }
 
+  function updateMeasureTableHeader(headers) {
+    const thead = document.querySelector('#e720-table thead tr');
+    if (!thead || !headers || !headers.length) return;
+    thead.innerHTML = '';
+    headers.forEach(function (h) {
+      const th = document.createElement('th');
+      th.textContent = h;
+      thead.appendChild(th);
+    });
+  }
+
+  function updateMeasureLabels(data) {
+    if (data.measure_table_headers) updateMeasureTableHeader(data.measure_table_headers);
+  }
+
   function applySnapshot(data) {
     if (!data) return;
+    updateMeasureLabels(data);
     updatePwmDisplay(data);
     if (data.error) {
       const banner = document.getElementById('exp-banner');
@@ -187,7 +203,10 @@
     if (measBody) fillTable(measBody, data.measurements, 5);
 
     const e720Body = document.querySelector('#e720-table tbody');
-    if (e720Body && data.e720_row) fillTable(e720Body, [data.e720_row], 9);
+    if (e720Body && data.e720_row) {
+      const cols = (data.measure_table_headers || []).length || data.e720_row.length;
+      fillTable(e720Body, [data.e720_row], cols);
+    }
 
     const controlTemp =
       typeof data.control_temp === 'number' && !Number.isNaN(data.control_temp)

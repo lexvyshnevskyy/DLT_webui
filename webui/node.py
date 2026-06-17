@@ -35,7 +35,14 @@ from webui.measure_sweep import (
     standard_frequencies_for_device,
 )
 from webui.e720_sweep import E720SweepConfig, E720SweepController, STANDARD_FREQUENCIES
-from webui.e720_view import e720_from_msg, e720_summary_text, e720_table_row
+from webui.e720_view import (
+    e720_from_msg,
+    e720_summary_text,
+    e720_table_row,
+    infer_measure_device_label,
+    measure_device_label,
+    measure_table_headers,
+)
 from webui.program_schedule import IDLE_EXPERIMENT_TIMING, ProgramStep, parse_program_steps
 from webui.export_data import export_program_archive, export_run_archive
 from webui.run_charts import delete_run_charts, freq_chart_filename, generate_run_charts, run_chart_dir
@@ -270,8 +277,9 @@ class WebHMINode(Node):
 
     def _on_e720(self, msg: E720) -> None:
         data = e720_from_msg(msg)
+        label = infer_measure_device_label(str(data.get('frame_id', '')), self.measure_source)
         line = (
-            f'[{self._stream_stamp()}] E7-20 '
+            f'[{self._stream_stamp()}] {label} '
             f"{'ON' if data.get('online') else 'OFF'} "
             f"f={data.get('frequency', 0):.3g} "
             f"ch1={data.get('firstvalue', 0):.4g} ch2={data.get('secondvalue', 0):.4g}"
@@ -492,6 +500,34 @@ class WebHMINode(Node):
     def _core_available(self) -> bool:
         return self._service_available(self.core_client)
 
+    def _pwm_status_note(self) -> Optional[str]:
+        if not self._core_available():
+            return None
+        core_cfg = get_configuration_snapshot(self.delatometry_env_file).get('core', {})
+        pwm_enabled_cfg = bool(core_cfg.get('enable_pwm_controller'))
+        tc = self._last_core_snapshot.get('temperature_control') or {}
+        pwm = self._last_core_snapshot.get('pwm') or {}
+        if pwm or tc:
+            return None
+        if not pwm_enabled_cfg:
+            return (
+                'Heater PWM disabled — Configuration → Core → enable PWM control, '
+                'check Restart service, Save'
+            )
+        from webui.collectors.gpio_pins import is_raspberry_pi_5
+
+        if is_raspberry_pi_5():
+            return (
+                'PWM enabled in config but core has no heater control — '
+                'Pi 5 uses lgpio (pigpiod does not work). '
+                'Install python3-lgpio, add dtoverlay=pwm to /boot/firmware/config.txt, reboot, '
+                'then: sudo systemctl restart delatometry-core'
+            )
+        return (
+            'PWM enabled in config but core has no heater control — '
+            'run: sudo systemctl enable --now pigpiod && sudo systemctl restart delatometry-core'
+        )
+
     def _critical_services_status(self) -> Dict[str, Any]:
         core_ok = self._core_available()
         db_ok = self._db_available()
@@ -503,11 +539,7 @@ class WebHMINode(Node):
             'system_ready': core_ok and db_ok,
             'missing_required_services': missing,
             'temperature_control_enabled': tc.get('enabled'),
-            'pwm_note': (
-                'Heater PWM disabled in core — set DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER=true'
-                if not tc and core_ok
-                else None
-            ),
+            'pwm_note': self._pwm_status_note(),
         }
 
     def _database_unavailable_message(self) -> str:
@@ -835,15 +867,16 @@ class WebHMINode(Node):
         exp_mode = normalize_experiment_mode(str(prog.get('experiment_mode', 'default')))
         exp_label = EXPERIMENT_MODE_LABELS.get(exp_mode, exp_mode)
         label = prog.get('run_label') or program_id
+        device_label = measure_device_label(self._sweep.config.normalized_device())
         if exp_mode == 'default':
             return (
                 f'RUNNING {label} — step {step}/{total}, '
-                f'target {target:.2f} K, E7-20 mode: {mode}'
+                f'target {target:.2f} K, {device_label} freq: {mode}'
                 if target is not None
-                else f'RUNNING {label} — step {step}/{total}, E7-20 mode: {mode}'
+                else f'RUNNING {label} — step {step}/{total}, {device_label} freq: {mode}'
             )
         return (
-            f'RUNNING {label} — step {step}/{total}, {exp_label}, E7-20 mode: {mode}'
+            f'RUNNING {label} — step {step}/{total}, {exp_label}, {device_label} freq: {mode}'
         )
 
     def _is_ltm_temperature(self, item: Dict[str, Any]) -> bool:
@@ -1373,8 +1406,28 @@ class WebHMINode(Node):
                 'DELATOMETRY_CORE_ENABLE_PWM_CONTROLLER': 'true' if enable_pwm else 'false',
             },
             'delatometry-core.service',
-            bool(restart),
+            False,
         )
+        if 'Failed' in msg or 'mismatch' in msg:
+            return msg, msg
+        if enable_pwm and restart:
+            from webui.collectors.gpio_pins import is_raspberry_pi_5
+
+            if not is_raspberry_pi_5():
+                pigpio = systemd_ops.control_unit('pigpiod.service', 'start', use_sudo=True)
+                if not pigpio.get('ok'):
+                    self._log(f'pigpiod start: {pigpio.get("error") or pigpio.get("message")}')
+        if restart:
+            ok_r, msg_r = restart_service('delatometry-core.service')
+            if ok_r:
+                msg = f'{msg} Restarted delatometry-core ({msg_r}).'
+            else:
+                msg = (
+                    f'{msg} Core restart failed: {msg_r}. '
+                    'Run: sudo systemctl restart delatometry-core'
+                )
+        elif enable_pwm:
+            msg = f'{msg} Restart delatometry-core to apply PWM.'
         return msg, msg
 
     def ui_save_ads1256_config(
@@ -1937,6 +1990,8 @@ class WebHMINode(Node):
             items = dict(self._latest_measurements)
             core = dict(self._last_core_snapshot.get('temperature_control') or {})
         e720_data = e720_from_msg(e720_msg)
+        live_label = infer_measure_device_label(str(e720_data.get('frame_id', '')), self.measure_source)
+        display_source = 'im3536' if live_label == 'IM3536' else 'e720'
         control = items.get(self.ltm_control_channel)
         control_temp = None
         if control and self._is_ltm_temperature(control):
@@ -1952,8 +2007,11 @@ class WebHMINode(Node):
             'measurements': self._measurements_table(),
             'ltm_summary': self._ltm_temperature_summary(),
             'ltm_stream': ltm_lines,
-            'e720_summary': e720_summary_text(e720_data),
-            'e720_row': e720_table_row(e720_data),
+            'measure_source': self.measure_source,
+            'measure_device_label': live_label,
+            'measure_table_headers': measure_table_headers(display_source),
+            'e720_summary': e720_summary_text(e720_data, measure_source=display_source),
+            'e720_row': e720_table_row(e720_data, measure_source=display_source),
             'e720_stream': e720_lines,
             'core_json': core,
             'control_temp': control_temp,

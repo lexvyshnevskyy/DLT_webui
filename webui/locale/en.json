@@ -159,6 +159,8 @@
   "experiment.ltm_stream": "LTM stream",
   "experiment.e720": "E7-20",
   "experiment.e720_stream": "E7-20 stream",
+  "experiment.im3536": "IM3536 LCR",
+  "experiment.im3536_stream": "IM3536 stream",
   "experiment.core_control": "Core temperature control",
   "experiment.manual": "Manual target",
   "experiment.manual_pwm_hint": "Check Enable control, set target (K), then Apply. Requires Configuration → Core: PWM control enabled and core service restarted. Drives PWM on CH1 and CH2.",

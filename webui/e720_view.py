@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+
+def measure_device_label(source: str) -> str:
+    normalized = (source or 'e720').strip().lower()
+    return 'IM3536' if normalized == 'im3536' else 'E7-20'
+
+
+def infer_measure_device_label(frame_id: str, configured_source: str = 'e720') -> str:
+    fid = str(frame_id or '')
+    if fid.startswith('im3536'):
+        return 'IM3536'
+    if fid.startswith('e720') or fid.startswith('measure_device'):
+        return 'E7-20'
+    return measure_device_label(configured_source)
 
 
 def format_frequency(value: float, dimension: str = 'Hz') -> str:
@@ -39,36 +53,49 @@ def e720_from_msg(msg: Any) -> Dict[str, Any]:
     }
 
 
-def e720_summary_text(data: Dict[str, Any]) -> str:
+def e720_summary_text(data: Dict[str, Any], *, measure_source: str = 'e720') -> str:
     if not data.get('online', False) and data.get('frame_id') == '':
-        return 'Measure device: waiting for data...'
+        label = measure_device_label(measure_source)
+        return f'{label}: waiting for data...'
     frame_id = str(data.get('frame_id', '') or '')
-    if frame_id.startswith('im3536'):
-        device_label = 'IM3536'
-    else:
-        device_label = 'E7-20'
+    device_label = infer_measure_device_label(frame_id, measure_source)
     status = 'ONLINE' if data.get('online') else 'OFFLINE'
     lines = [
         f'{device_label} — Status: {status} ({frame_id})',
         f'Primary:   {data.get("imparam", "")} = {data.get("firstvalue", 0):.6g}',
         f'Secondary: {data.get("secparam", "")} = {data.get("secondvalue", 0):.6g}',
         f'Frequency: {format_frequency(float(data.get("frequency", 0) or 0))}',
-        f'Level:     {float(data.get("level", 0) or 0):.2f}',
-        f'Offset:    {float(data.get("offset", 0) or 0):.2f}',
-        f'Range:     {data.get("limit", "")}',
     ]
+    if device_label == 'E7-20':
+        lines.extend([
+            f'Level:     {float(data.get("level", 0) or 0):.2f}',
+            f'Offset:    {float(data.get("offset", 0) or 0):.2f}',
+            f'Range:     {data.get("limit", "")}',
+        ])
     return '\n'.join(lines)
 
 
-def e720_table_row(data: Dict[str, Any]) -> list:
-    return [
+def measure_table_headers(measure_source: str) -> List[str]:
+    if measure_device_label(measure_source) == 'IM3536':
+        return ['Online', 'Param 1', 'Value 1', 'Param 2', 'Value 2', 'Frequency']
+    return ['Online', 'Ch1 param', 'Ch1', 'Ch2 param', 'Ch2', 'Freq', 'Level', 'Offset', 'Range']
+
+
+def e720_table_row(data: Dict[str, Any], *, measure_source: str = 'e720') -> list:
+    frame_id = str(data.get('frame_id', '') or '')
+    device_label = infer_measure_device_label(frame_id, measure_source)
+    row = [
         'yes' if data.get('online') else 'no',
         data.get('imparam', ''),
         data.get('firstvalue', 0),
         data.get('secparam', ''),
         data.get('secondvalue', 0),
         format_frequency(float(data.get('frequency', 0) or 0)),
-        float(data.get('level', 0) or 0),
-        float(data.get('offset', 0) or 0),
-        data.get('limit', ''),
     ]
+    if device_label == 'E7-20':
+        row.extend([
+            float(data.get('level', 0) or 0),
+            float(data.get('offset', 0) or 0),
+            data.get('limit', ''),
+        ])
+    return row

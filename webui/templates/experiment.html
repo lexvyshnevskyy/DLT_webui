@@ -39,14 +39,14 @@
     <h3>{{ _('experiment.ltm_stream') }}</h3>
     <pre id="ltm-stream" class="log stream"></pre>
   </section>
-  <section class="card">
-    <h2>{{ _('experiment.e720') }}</h2>
+  <section class="card" id="measure-card">
+    <h2 id="measure-title">{{ measure_title }}</h2>
     <pre id="e720-summary" class="mono"></pre>
     <table class="data" id="e720-table">
-      <thead><tr><th>Online</th><th>Ch1 param</th><th>Ch1</th><th>Ch2 param</th><th>Ch2</th><th>Freq</th><th>Level</th><th>Offset</th><th>Range</th></tr></thead>
+      <thead><tr>{% for h in measure_table_headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
       <tbody><tr></tr></tbody>
     </table>
-    <h3>{{ _('experiment.e720_stream') }}</h3>
+    <h3 id="measure-stream-title">{{ measure_stream_title }}</h3>
     <pre id="e720-stream" class="log stream"></pre>
   </section>
 </section>
@@ -67,5 +67,5 @@
 </section>
 {% endblock %}
 {% block scripts %}
-<script src="/static/experiment.js?v=2" defer></script>
+<script src="/static/experiment.js?v=3" defer></script>
 {% endblock %}

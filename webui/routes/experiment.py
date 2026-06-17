@@ -8,6 +8,8 @@ from fastapi import APIRouter, Form, Query, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from webui.async_bridge import run_blocking
+from webui.e720_view import measure_table_headers
+from webui.i18n import translate_experiment_measure_stream, translate_experiment_measure_title
 from webui.render import template_response
 
 router = APIRouter()
@@ -28,6 +30,10 @@ async def experiment_page(request: Request, msg: str = Query('')) -> HTMLRespons
             'title': node.title,
             'refresh_sec': node.status_refresh_period_sec,
             'message': msg,
+            'measure_source': node.measure_source,
+            'measure_title': translate_experiment_measure_title(node.measure_source),
+            'measure_stream_title': translate_experiment_measure_stream(node.measure_source),
+            'measure_table_headers': measure_table_headers(node.measure_source),
         },
     )
 

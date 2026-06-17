@@ -1,11 +1,34 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import List, Set
 
 
-# BCM pins commonly usable for PWM on Raspberry Pi (pigpio).
+def _read_pi_revision() -> str:
+    try:
+        with open('/proc/cpuinfo', encoding='ascii', errors='replace') as handle:
+            for line in handle:
+                if line.lower().startswith('revision'):
+                    return line.split(':', 1)[-1].strip().lower()
+    except OSError:
+        pass
+    return ''
+
+
+def is_raspberry_pi_5() -> bool:
+    rev = _read_pi_revision()
+    if re.match(r'^[dc]04', rev):
+        return True
+    try:
+        model = Path('/proc/device-tree/model').read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return False
+    return 'raspberry pi 5' in model.lower()
+
+
+# BCM pins commonly usable for PWM on Raspberry Pi (hardware PWM: 12, 13, 18, 19).
 DEFAULT_BCM_PINS: List[int] = [
     2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
 ]

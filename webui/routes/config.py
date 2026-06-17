@@ -260,8 +260,8 @@ async def save_core(
     restart: bool = Form(False),
 ) -> RedirectResponse:
     _, node = _tpl(request)
-    node.ui_save_core_config(pwm_ch1, pwm_ch2, enable_db_client, enable_pwm, restart)
-    return RedirectResponse(url='/configuration', status_code=303)
+    msg, _ = node.ui_save_core_config(pwm_ch1, pwm_ch2, enable_db_client, enable_pwm, restart)
+    return RedirectResponse(url=f'/configuration?msg={quote(msg)}#core', status_code=303)
 
 
 @router.post('/configuration/ads')

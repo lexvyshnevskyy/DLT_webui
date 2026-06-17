@@ -159,6 +159,8 @@
   "experiment.ltm_stream": "Потік LTM",
   "experiment.e720": "E7-20",
   "experiment.e720_stream": "Потік E7-20",
+  "experiment.im3536": "IM3536 LCR",
+  "experiment.im3536_stream": "Потік IM3536",
   "experiment.core_control": "Керування температурою Core",
   "experiment.manual": "Ручна ціль",
   "experiment.manual_pwm_hint": "Увімкніть «Керування», задайте ціль (K) і натисніть Застосувати. Потрібно: Налаштування → Core — PWM увімкнено та перезапуск delatometry-core.service. PWM на CH1 і CH2.",

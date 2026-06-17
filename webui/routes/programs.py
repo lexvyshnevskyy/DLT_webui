@@ -223,7 +223,7 @@ async def program_run_view(
     msg: str = Query(''),
 ) -> HTMLResponse:
     templates, node = _tpl(request)
-    fields = node.program_run_view_fields(program_id, run_id)
+    fields = await run_blocking(node.program_run_view_prepare, program_id, run_id)
     return template_response(
         templates,
         request,
@@ -259,11 +259,35 @@ async def program_run_regenerate_charts(
     run_id: int = Form(...),
 ) -> RedirectResponse:
     _, node = _tpl(request)
-    node._schedule_run_charts(int(run_id), int(program_id))
+
+    def _regenerate() -> dict:
+        return node.ensure_run_charts(int(program_id), int(run_id), force=True)
+
+    result = await run_blocking(_regenerate)
+    if result.get('ok'):
+        charts = result.get('charts') or []
+        msg = f'Charts generated ({len(charts)} file(s))' if charts else 'Charts generated'
+    else:
+        msg = result.get('error') or result.get('message') or 'Chart generation failed'
     return RedirectResponse(
-        url=f'/program-run?program_id={program_id}&run_id={run_id}&msg=Chart+generation+started',
+        url=f'/program-run?program_id={program_id}&run_id={run_id}&msg={quote(msg)}',
         status_code=303,
     )
+
+
+@router.get('/api/program-run/charts')
+async def program_run_charts_api(
+    request: Request,
+    program_id: int = Query(...),
+    run_id: int = Query(...),
+) -> JSONResponse:
+    _, node = _tpl(request)
+    fields = await run_blocking(node.program_run_view_fields, program_id, run_id)
+    return JSONResponse({
+        'result': 'Ok',
+        'charts_ready': bool(fields.get('charts_ready')),
+        'is_active': bool(fields.get('is_active')),
+    })
 
 
 @router.get('/api/program-run/measurements')

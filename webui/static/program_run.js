@@ -104,9 +104,40 @@
     loadMore();
   }
 
+  function initChartPolling() {
+    const meta = document.getElementById('run-charts-meta');
+    if (!meta) return;
+    if (meta.dataset.chartsReady === 'true') return;
+
+    const programId = meta.dataset.programId;
+    const runId = meta.dataset.runId;
+    let polls = 0;
+    const maxPolls = 60;
+
+    const timer = window.setInterval(async () => {
+      polls += 1;
+      if (polls > maxPolls) {
+        window.clearInterval(timer);
+        return;
+      }
+      try {
+        const url = `/api/program-run/charts?program_id=${encodeURIComponent(programId)}&run_id=${encodeURIComponent(runId)}`;
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (data.charts_ready) {
+          window.clearInterval(timer);
+          window.location.reload();
+        }
+      } catch (_err) {
+        /* keep polling */
+      }
+    }, 2000);
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     initClickableRows();
     initMeasurementsLazyLoad();
+    initChartPolling();
   });
 })();

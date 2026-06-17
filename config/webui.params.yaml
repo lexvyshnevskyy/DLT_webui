@@ -19,7 +19,7 @@ webui:
     database_list_timeout_sec: 30.0
     programs_cache_refresh_sec: 3.0
     core_service_timeout_sec: 3.0
-    run_charts_dir: ''
+    run_charts_dir: ''  # default: DELATOMETRY_WEBUI_RUN_CHARTS_DIR or /var/lib/delatometry/run_charts
     ltm_raw_topic: /ltm2985/raw_json
     ads_topic: /ads1256
     stream_max_lines: 30

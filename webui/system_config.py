@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -162,3 +163,19 @@ def get_configuration_snapshot(env_file: str) -> Dict[str, Any]:
             'fallback_to_simulation': env.get('DELATOMETRY_ADS1256_FALLBACK_TO_SIMULATION', 'true').lower() == 'true',
         },
     }
+
+
+def resolve_run_charts_dir(param_value: str, env_file: str) -> str:
+    explicit = (param_value or '').strip()
+    if explicit:
+        return explicit
+    env = read_env_file(env_file)
+    from_env = (env.get('DELATOMETRY_WEBUI_RUN_CHARTS_DIR') or '').strip()
+    if from_env:
+        return from_env
+    persistent = Path('/var/lib/delatometry/run_charts')
+    try:
+        persistent.mkdir(parents=True, exist_ok=True)
+        return str(persistent)
+    except OSError:
+        return str(Path(tempfile.gettempdir()) / 'delatometry_run_charts')

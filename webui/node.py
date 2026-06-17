@@ -50,6 +50,7 @@ from webui.measure_source import resolve_measure_topics_from_env
 from webui.system_config import (
     get_configuration_snapshot,
     read_env_file,
+    resolve_run_charts_dir,
     restart_service,
     serial_port_choices,
     write_env_file,
@@ -169,8 +170,15 @@ class WebHMINode(Node):
         export_dir = str(self.get_parameter('export_dir').value).strip()
         self.export_dir = export_dir or str(Path(tempfile.gettempdir()) / 'delatometry_exports')
         charts_dir = str(self.get_parameter('run_charts_dir').value).strip()
-        self.run_charts_dir = charts_dir or str(Path(tempfile.gettempdir()) / 'delatometry_run_charts')
+        self.run_charts_dir = resolve_run_charts_dir(charts_dir, self.delatometry_env_file)
         Path(self.run_charts_dir).mkdir(parents=True, exist_ok=True)
+        if self.run_charts_dir.startswith(tempfile.gettempdir()):
+            self.get_logger().warning(
+                f'Run charts stored in temp dir ({self.run_charts_dir}); '
+                'set DELATOMETRY_WEBUI_RUN_CHARTS_DIR for persistence across reboot.'
+            )
+        else:
+            self.get_logger().info(f'Run charts directory: {self.run_charts_dir}')
 
         units_param = self.get_parameter('systemd_units').value
         self.systemd_units = (
@@ -657,6 +665,28 @@ class WebHMINode(Node):
                 self._log(f'Chart generation for run {run_id} failed: {exc}')
 
         threading.Thread(target=_worker, daemon=True, name=f'run-charts-{run_id}').start()
+
+    def ensure_run_charts(self, program_id: int, run_id: int, force: bool = False) -> Dict[str, Any]:
+        pid, rid = int(program_id), int(run_id)
+        chart_dir = run_chart_dir(Path(self.run_charts_dir), pid, rid)
+        if not force and (chart_dir / 'temperature.png').is_file():
+            return {'ok': True, 'skipped': True}
+        try:
+            return generate_run_charts(self._db_query, self.run_charts_dir, rid, pid)
+        except Exception as exc:
+            return {'ok': False, 'error': str(exc)}
+
+    def program_run_view_prepare(self, program_id: int, run_id: int) -> Dict[str, Any]:
+        fields = self.program_run_view_fields(program_id, run_id)
+        if (
+            not fields.get('charts_ready')
+            and not fields.get('is_active')
+            and int(fields.get('sample_count', 0) or 0) > 0
+        ):
+            result = self.ensure_run_charts(program_id, run_id)
+            if result.get('ok'):
+                fields = self.program_run_view_fields(program_id, run_id)
+        return fields
 
     def run_chart_file_path(self, program_id: int, run_id: int, name: str) -> Optional[Path]:
         safe = Path(name).name

@@ -22,13 +22,18 @@
 
 <section class="card">
   <h2>{{ _('program_run.temp_chart') }}</h2>
+  <div id="run-charts-meta" hidden
+       data-program-id="{{ program_id }}"
+       data-run-id="{{ run_id }}"
+       data-charts-ready="{{ 'true' if charts_ready else 'false' }}"
+       data-is-active="{{ 'true' if is_active else 'false' }}"></div>
   {% if temperature_chart_url %}
-  <img class="run-chart-img" src="{{ temperature_chart_url }}" alt="{{ _('program_run.temp_chart') }}">
+  <img class="run-chart-img" id="run-temp-chart" src="{{ temperature_chart_url }}" alt="{{ _('program_run.temp_chart') }}">
   {% elif is_active %}
   <p class="muted">{{ _('program_run.charts_after_stop') }}</p>
   {% else %}
-  <p class="muted">{{ _('program_run.charts_missing') }}</p>
-  <form method="post" action="/program-run/regenerate-charts" class="inline">
+  <p class="muted" id="run-charts-missing">{{ _('program_run.charts_missing') }}</p>
+  <form method="post" action="/program-run/regenerate-charts" class="inline" id="run-regenerate-charts-form">
     <input type="hidden" name="program_id" value="{{ program_id }}">
     <input type="hidden" name="run_id" value="{{ run_id }}">
     <button type="submit" class="btn">{{ _('program_run.regenerate_charts') }}</button>
@@ -85,5 +90,5 @@
 </section>
 {% endblock %}
 {% block scripts %}
-<script src="/static/program_run.js" defer></script>
+<script src="/static/program_run.js?v=2" defer></script>
 {% endblock %}
